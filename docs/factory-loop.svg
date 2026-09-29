@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 760" role="img" aria-labelledby="title description">
+  <title id="title">The factory loop</title>
+  <desc id="description">A ticket, URL, or prompt enters a loop that runs Triage, Spec, Implement, Review, Verify, and Ship, then opens a PR. A human approves the spec before implementation and decides to ship after verification. Failed review or verification sends work back to Implement.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="9" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1 L10 7 L2 13" fill="none" stroke="#463a14" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-muted" markerWidth="12" markerHeight="12" refX="8" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1 L8 6 L2 11" fill="none" stroke="#9a8f6c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <g id="person" fill="none" stroke="#1b1bff" stroke-width="2.4" stroke-linecap="round">
+      <circle cx="0" cy="-6" r="7"/>
+      <path d="M-12 13 C-12 4 -6 1 0 1 C6 1 12 4 12 13"/>
+    </g>
+    <style>
+      text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+      .stage { font-size: 32px; fill: #463a14; }
+      .human { font-size: 32px; fill: #1b1bff; }
+      .title { font-size: 50px; fill: #463a14; font-weight: 500; text-anchor: middle; }
+      .muted { font-size: 22px; fill: #9a8f6c; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; fill: #9a8f6c; text-anchor: middle; }
+      .box { fill: none; stroke: #1b1bff; stroke-width: 3; stroke-dasharray: 7 7; }
+      .link { stroke: #1b1bff; stroke-width: 3; stroke-dasharray: 7 7; }
+      .dot { fill: #1b1bff; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="760" fill="#fcfcf2"/>
+
+  <!-- main loop -->
+  <path d="M800 210 A210 210 0 1 1 694.2 238.6" fill="none" stroke="#463a14" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <!-- rework loop -->
+  <path d="M664.9 514.6 A165 165 0 0 0 926.4 526.1" fill="none" stroke="#9a8f6c" stroke-width="2" stroke-dasharray="4 6" marker-end="url(#arrow-muted)"/>
+  <text x="800" y="562" class="muted" text-anchor="middle">rework</text>
+
+  <!-- center -->
+  <text x="800" y="418" class="title">The factory</text>
+  <text x="800" y="458" class="mono">.factory/runs/&lt;id&gt;/</text>
+
+  <!-- input -->
+  <rect x="772" y="26" width="56" height="56" class="box"/>
+  <use href="#person" x="800" y="54"/>
+  <text x="800" y="124" class="human" text-anchor="middle">Ticket, URL,</text>
+  <text x="800" y="158" class="human" text-anchor="middle">or prompt</text>
+  <line x1="800" y1="172" x2="800" y2="204" class="link"/>
+  <circle cx="800" cy="210" r="8" class="dot"/>
+
+  <!-- stages -->
+  <text x="966" y="192" class="stage">Triage</text>
+  <text x="1063" y="304" class="stage">Spec</text>
+  <text x="1038" y="596" class="stage">Implement</text>
+  <text x="800" y="692" class="stage" text-anchor="middle">Review</text>
+  <text x="562" y="596" class="stage" text-anchor="end">Verify</text>
+  <text x="537" y="304" class="stage" text-anchor="end">Ship</text>
+  <text x="680" y="196" class="muted" text-anchor="end">opens a PR</text>
+
+  <!-- checkpoint 1: spec approval -->
+  <circle cx="1006.8" cy="383.5" r="8" class="dot"/>
+  <circle cx="1010" cy="420" r="8" class="dot"/>
+  <circle cx="1006.8" cy="456.5" r="8" class="dot"/>
+  <line x1="1018" y1="420" x2="1060" y2="420" class="link"/>
+  <rect x="1060" y="345" width="236" height="150" class="box"/>
+  <use href="#person" x="1094" y="382"/>
+  <text x="1080" y="440" class="human">Approving</text>
+  <text x="1080" y="476" class="human">the spec</text>
+
+  <!-- checkpoint 2: ship decision -->
+  <circle cx="593.2" cy="383.5" r="8" class="dot"/>
+  <circle cx="590" cy="420" r="8" class="dot"/>
+  <circle cx="593.2" cy="456.5" r="8" class="dot"/>
+  <line x1="540" y1="420" x2="582" y2="420" class="link"/>
+  <rect x="304" y="345" width="236" height="150" class="box"/>
+  <use href="#person" x="338" y="382"/>
+  <text x="324" y="440" class="human">Deciding</text>
+  <text x="324" y="476" class="human">to ship</text>
+</svg>
