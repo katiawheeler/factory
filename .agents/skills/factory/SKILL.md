@@ -107,9 +107,7 @@ Dispatch the triage stage. A new run is already at `triage`, so don't advance fi
 Dispatch the spec stage right after `advance <id> spec`. Then `advance <id> checkpoint-1`.
 
 ### checkpoint-1: spec approval (HUMAN)
-Present:
-- the spec's **Summary**, **Acceptance criteria** (condensed), and **Open questions**, including their defaults
-- the path to `spec.md`, noting it can be edited directly before approving
+Before asking for approval (or stopping for a headless answer), read the current run's `spec.md` and output its **complete contents verbatim** in a user-visible chat message. Do this every time the spec approval checkpoint is presented, including when resuming at `checkpoint-1` without an answer. A summary, excerpt, or file path alone is insufficient. Also give the path to `spec.md` and note that the human can edit it directly before approving. This applies to spec approval, not the triage questions that also use `checkpoint-1`. If an answer was supplied in the arguments, apply it directly without presenting the checkpoint again.
 
 Then get the answer. See "Asking at a checkpoint" below. Outcomes:
 - **approve** → log it with `feedback` (note any open-question defaults it accepts), then `advance <id> implement`.
