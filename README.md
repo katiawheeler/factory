@@ -17,7 +17,7 @@ Agents write their outputs to `.factory/runs/<run-id>/`. At the two approval poi
 | Stage | Output | Human decision |
 |---|---|---|
 | Triage | `triage.md` with resolved input, risks, questions, and verdict | Clarify or override if needed |
-| Spec | `spec.md` with testable acceptance criteria and open questions | Checkpoint 1: approve or request a revision; the human may edit `spec.md` directly |
+| Spec | `spec.md` with testable acceptance criteria, open questions, and diagrams where they help | Checkpoint 1: approve or request a revision; the human may edit `spec.md` directly |
 | Implement | Code commits and `implementation.md` | Steer if blocked |
 | Review | `review.md` with blocking findings and notes | Findings are shown at checkpoint 2 |
 | Verify | `verification.md` and `evidence/`, with a suite result and one result per criterion | Checkpoint 2: inspect evidence, ship, or send work back |

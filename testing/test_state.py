@@ -138,6 +138,20 @@ class StateTest(unittest.TestCase):
         result = json.loads(self.run_state("check-verification", self.id).stdout)
         self.assertEqual(result["results"], {"AC1": "verified", "AC2": "verified"})
 
+    def test_verification_accepts_adaptive_spec(self):
+        folder = self.repo / ".factory/runs" / self.id
+        (folder / "spec.md").write_text(
+            "# Spec: adaptive\n\nRound: 1\n\n## Summary\nFix a bug.\n\n"
+            "## Acceptance criteria\n- [ ] AC1: first. **Verify by:** run it\n- [ ] AC2: second. **Verify by:** read it\n\n"
+            "## Root cause\nThe parser drops a line.\n\n"
+            "```mermaid\nflowchart LR\n  A[\"parse (CHANGED)\"] --> B[\"render\"]\n```\n\n"
+            "## Approach\n### Parser\nKeep the line.\n\n## Out of scope\nNone.\n\n## Test plan\nAdd a test.\n\n"
+            "## Risks\nNone.\n\n## Open questions\nNone.\n\n## Changes from previous round\nNone.\n")
+        (folder / "verification.md").write_text("Verdict: pass\nSuite: pass\n### AC1: first\nResult: verified\n"
+                                                "### AC2: second\nResult: verified\n")
+        result = json.loads(self.run_state("check-verification", self.id).stdout)
+        self.assertEqual(result["results"], {"AC1": "verified", "AC2": "verified"})
+
 
 if __name__ == "__main__":
     unittest.main()
