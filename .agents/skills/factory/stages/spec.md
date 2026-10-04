@@ -15,7 +15,7 @@ You are the spec stage of a software factory. A human will read your spec at che
 ## What to do
 1. Read the relevant code that triage identified, enough to propose a concrete approach that matches existing patterns.
 2. Write the spec. Be specific: name files, functions, and data shapes. Say what's out of scope. Choose the spec's shape from triage's Type and Size: which extra sections to add and whether a diagram helps. See **Shaping the spec** and **Diagrams** below.
-3. Write acceptance criteria that the verify agent can check with evidence. Each criterion is observable, like a command, a request, UI behavior, or a test that should pass. Avoid "works correctly". Go beyond the happy path where these apply: cover failure and edge cases (bad input, missing files, errors, empty states) and existing behavior that must not change.
+3. Write acceptance criteria that the verify agent can check with evidence. Each criterion is observable, like a command, a request, UI behavior, or a test that should pass. Avoid "works correctly". Go beyond the happy path where these apply: cover failure and edge cases (bad input, missing files, errors, empty states) and existing behavior that must not change. For a UI criterion, verify turns the "Verify by" note into a Playwright script, so write it as numbered steps from a known starting state: the URL, which user is logged in, what data exists, the labels and button text to use, and the visible result to assert at the end. If reaching that state needs seeded data, a login, or a faked failure, say how.
 4. Put anything you had to assume under **Open questions**, along with the default you chose. The human will confirm or correct it at the checkpoint.
 5. **Check it's self-consistent before you write it.** Every concrete value (exit codes, output strings, file names, formats, flag names) has to be identical in the acceptance criteria, their "Verify by" notes, the approach, and the test plan. Downstream agents treat each section as binding, so a contradiction becomes a bug or a false failure. Any command in a "Verify by" note has to be one that actually works in this repo, like its documented run and test commands. Check it rather than guessing, e.g. `python -m pkg` only works if `pkg/__main__.py` exists. Diagrams count too: the names and flows in a diagram must match the Approach and the acceptance criteria.
 
@@ -27,7 +27,7 @@ Fit the spec to the problem. Triage's Type and Size tell you what the reader nee
 | Problem type | Extra section | What it holds |
 | --- | --- | --- |
 | Bug fix | `Root cause` | What's wrong, where, and why, plus repro steps |
-| UI change | `User flow` and/or `UI states` | The steps a user takes; the empty, loading, error, and success states |
+| UI change | `User flow` and/or `UI states` | The steps a user takes, with the labels they click and what they see; the empty, loading, error, and success states and how to reach each one |
 | API or data change | `Data shapes` | Schemas, request and response examples, before → after |
 | Cross-cutting or multi-component change | `Architecture` | The components and how they interact, usually with a diagram |
 | Migration or risky rollout | `Rollout and rollback` | Order of steps, how to detect trouble, how to undo |

@@ -344,7 +344,8 @@ def gh_can_attach():
 def media_section(folder, criteria, attach):
     """Screenshots and recordings grouped by criterion; returns (markdown lines, paths to attach)."""
     files = sorted(p for p in (folder / "evidence").rglob("*")
-                   if p.is_file() and p.suffix.lower() in IMAGE_EXTS | VIDEO_EXTS) \
+                   if p.is_file() and p.suffix.lower() in IMAGE_EXTS | VIDEO_EXTS
+                   and "node_modules" not in p.relative_to(folder).parts) \
         if (folder / "evidence").exists() else []
     if not files:
         return [], []
@@ -368,7 +369,8 @@ def media_section(folder, criteria, attach):
         out += ["", f"**{ac}** {criteria.get(ac, '')}".rstrip() if ac else "**Other**"]
         for p in groups[ac]:
             rel = p.relative_to(folder).as_posix()
-            alt = re.sub(r"^AC\d+[-_ .]*", "", p.stem, flags=re.IGNORECASE).replace("-", " ").replace("_", " ")
+            alt = re.sub(r"^AC\d+[-_ .]*", "", p.stem, flags=re.IGNORECASE)
+            alt = re.sub(r"^0*(\d+)[-_ .]+", r"step \1: ", alt).replace("-", " ").replace("_", " ")
             # gh rewrites each local reference in place; a video renders as a player only alone in its paragraph.
             out += ["", f"![{ac + ': ' if ac else ''}{alt}]({rel})" if p.suffix.lower() in IMAGE_EXTS else rel]
     if skipped:

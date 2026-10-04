@@ -30,7 +30,7 @@ Real agents rarely loop to a cap, because they escalate first. To test the orche
 
 The stubs run on Haiku and only touch `STUB.txt`, so a full cap cycle takes a few minutes.
 
-## End-to-end flows for worktrees, the PR report, and notifications
+## End-to-end flows for worktrees, the PR report, Playwright, and notifications
 
 These additions have unit tests, but no full factory run with real agents has exercised them yet. Run these flows to cover them, then record the results in the coverage table below. Use a sample repo with a remote you can open PRs on. Flows marked **(UI)** need a repo with a web UI and a verify stage that can drive a browser, like `notesy`.
 
@@ -71,6 +71,18 @@ git diff --name-only <base>...factory/<id>             # what the run branch act
 6. **No `gh`.** Ship with `gh` absent and only the GitHub MCP tools available. Expect `pr-report` to print only the file path, and the orchestrator to post `pr-report.md` with the MCP tools.
 7. **Oversized files.** Put an image over 10 MB in `evidence/` before ship. Expect it to be named under "Not uploaded" in the comment and left out of the `--attach` list, while the other images still upload.
 
+### Playwright flows in verify
+
+The standalone recipe has been checked by hand: a script with `test.use({ video: 'on', trace: 'retain-on-failure' })` saved numbered screenshots to `EVIDENCE` and a `video.webm` per test, plus a `trace.zip` for the failing test. With the latest `@playwright/test` and an older preinstalled Chromium, it failed with `Executable doesn't exist` until `PW_CHROMIUM` pointed at the installed browser. Run these with real agents:
+
+1. **(UI) Multi-step flow with login, standalone.** On a repo without Playwright, spec a change behind a login with a 4–6 step flow. Expect `spec.md` to write the flow as numbered steps from a known starting state. Expect verify to create `<run>/playwright/` with its own `node_modules`, a script per UI criterion that asserts the end state, `AC<n>-01-…` step screenshots, `AC<n>-flow.webm`, and a `Replay:` command that works when you paste it. The repo should stay clean.
+2. **(UI) Repo with Playwright configured.** On a repo with a Playwright config, `webServer`, and a login setup project, expect verify to copy the script into the repo's test directory, run it with the repo's config and fixtures, delete the copy, and leave `git status` clean.
+3. **(UI) Failing flow.** Break the change so a UI criterion fails. Expect `Result: failed`, `AC<n>-trace.zip` named in Evidence with its `show-trace` command, and the video showing where the flow stopped.
+4. **(UI) Hard-to-reach state.** Spec an error state, such as a failed save or an expired session. Expect the script to fake it with `page.route` or `page.clock`, and Evidence to say what was faked.
+5. **(UI) Second round.** Send the run back from ② and verify again. Expect last round's screenshots and videos to be gone from `evidence/`, and the PR comment to show only the final round's media.
+6. **(UI) Browser mismatch.** In an environment whose preinstalled browser doesn't match the latest `@playwright/test`, expect verify to set `PW_CHROMIUM` or install the matching browser, not to mark the criterion `unverifiable`.
+7. **No browser.** In an environment with no usable browser and no downloads, expect the UI criteria to be `unverifiable` with the exact launch error, never `verified`.
+
 ### Notifications
 
 1. **Every human stop notifies once.** `git config factory.notify 'cat >> /tmp/factory-notify.log; echo >> /tmp/factory-notify.log'`, then run a request vague enough for triage to return `needs-human`, all the way to ship. Expect one JSON line each for `checkpoint-1` (triage questions), `checkpoint-1` (spec), `checkpoint-2`, and `done` with `pr_url`, and none for work stages.
@@ -109,11 +121,13 @@ git diff --name-only <base>...factory/<id>             # what the run branch act
 | Worktree per run: dirty checkout untouched, dependencies installed, parallel runs, release on ship, abort with leftovers, `--in-place`, older runs, stubs (worktree flows 1–8) | not yet run | ⏳ |
 | PR report: inline screenshots and recordings, no duplicate on resume, older `gh`, failed upload, no `gh`, oversized files (PR report flows 1–7) | not yet run | ⏳ |
 | Notifications: each human stop, blocked, a real channel, environment override, failing command, waiting time (notification flows 1–6) | not yet run | ⏳ |
+| Standalone Playwright recipe: screenshots via `EVIDENCE`, video per test, trace on failure, `PW_CHROMIUM` for a mismatched browser | by hand, static page, `@playwright/test` 1.63 | ✅ |
+| Playwright in verify with real agents: standalone and repo-configured, failing flow, faked states, second round, browser mismatch, no browser (Playwright flows 1–7) | not yet run | ⏳ |
 
 Codex GUI question routing and selection of a dedicated PR creation skill are documented behavior; they have not yet been exercised in an end-to-end factory run.
 
 ## Known limitations
 
 - **In-place runs share the checkout.** A run created with `--in-place` switches the checkout to its branch, so only one can be active there at a time. Default runs each get a worktree and don't have this limit.
-- **Untested end to end:** worktree-per-run, posting the PR report, and notifications are covered by the unit tests above, but have not yet been exercised in a full factory run with real agents. See [End-to-end flows for worktrees, the PR report, and notifications](#end-to-end-flows-for-worktrees-the-pr-report-and-notifications).
+- **Untested end to end:** worktree-per-run, posting the PR report, Playwright in verify, and notifications are covered by the unit tests above, but have not yet been exercised in a full factory run with real agents. See [End-to-end flows for worktrees, the PR report, Playwright, and notifications](#end-to-end-flows-for-worktrees-the-pr-report-playwright-and-notifications).
 - **Long headless runs** can outlive a wrapping tool's timeout. Run them in the background and wait on the PID.
