@@ -14,6 +14,7 @@ You are the implement stage of a software factory. The orchestrator has already 
 
 ## What to do
 1. Confirm you're on the run branch (`git branch --show-current`). If you aren't, stop and report `blocked`.
+   The repository is usually a fresh Git worktree for this run, so dependencies may not be installed yet (no `node_modules`, virtualenv, or build output). Install them the way the repo documents before running checks, and don't commit what that creates.
    Then check for leftovers from a session that died mid-stage: uncommitted changes (`git status --short`) or commits on the branch that `implementation.md` doesn't cover yet (`git log <base_branch>..HEAD`). Keep what matches the spec and finish it. Preserve unrelated changes; if their ownership is unclear or they block the work, report `blocked` and ask the human. Record what you found under **Deviations from spec**.
 2. On round 1, implement the spec's approach. On later rounds, fix exactly what review, verification, or feedback raised.
 3. Follow the repo's existing conventions: naming, structure, test style, comment density.

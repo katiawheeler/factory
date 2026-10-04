@@ -1,5 +1,6 @@
 """Unit tests for the /factory state helper. Run: python3 testing/test_state.py"""
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -20,9 +21,9 @@ class StateTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_state(self, *args, input="", ok=True):
-        r = subprocess.run(["python3", str(STATE), *args], cwd=self.repo, input=input,
-                           capture_output=True, text=True)
+    def run_state(self, *args, input="", ok=True, cwd=None, env=None):
+        r = subprocess.run(["python3", str(STATE), *args], cwd=cwd or self.repo, input=input,
+                           capture_output=True, text=True, env={**os.environ, **(env or {})})
         if ok:
             self.assertEqual(r.returncode, 0, r.stderr)
         else:
@@ -35,6 +36,10 @@ class StateTest(unittest.TestCase):
     def advance(self, *stages):
         return [self.run_state("advance", self.id, s).stdout.strip() for s in stages]
 
+    def git(self, *args, cwd=None):
+        return subprocess.run(["git", *args], cwd=cwd or self.repo, capture_output=True, text=True,
+                              check=True).stdout.strip()
+
     def test_new_run(self):
         s = self.state()
         self.assertRegex(self.id, r"^\d{8}-some-slug$")
@@ -43,22 +48,56 @@ class StateTest(unittest.TestCase):
         second = self.run_state("new", "Some Slug!", "-", input="x").stdout.split()[0]
         self.assertEqual(second, self.id + "-2")
 
-    def test_new_refuses_dirty_tree_and_run_branch(self):
+    def test_new_run_gets_its_own_worktree(self):
+        s = self.state()
+        wt = self.repo / ".factory/worktrees" / self.id
+        self.assertEqual((s["repo"], s["worktree"]), (str(wt), str(wt)))
+        self.assertEqual(self.git("branch", "--show-current", cwd=wt), f"factory/{self.id}")
+        self.assertEqual(self.git("branch", "--show-current"), "main")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_new_worktree_leaves_dirty_checkout_alone(self):
+        (self.repo / "mine.txt").write_text("work in progress")
+        r = self.run_state("new", "b", "-", input="x")
+        self.assertEqual(r.stdout.split()[2], str(self.repo / ".factory/worktrees" / r.stdout.split()[0]))
+        self.assertEqual((self.repo / "mine.txt").read_text(), "work in progress")
+        self.assertFalse((Path(r.stdout.split()[2]) / "mine.txt").exists())
+
+    def test_new_in_place(self):
         (self.repo / "f").write_text("x")
-        self.run_state("new", "a", "-", ok=False)
+        self.assertIn("dirty", self.run_state("new", "a", "-", "--in-place", ok=False).stderr)
         (self.repo / "f").unlink()
-        subprocess.run(["git", "switch", "-q", "-c", "factory/x"], cwd=self.repo, check=True)
+        run_id = self.run_state("new", "a", "-", "--in-place", input="x").stdout.split()[0]
+        s = json.loads((self.repo / ".factory/runs" / run_id / "state.json").read_text())
+        self.assertEqual((s["repo"], s["worktree"]), (str(self.repo), None))
+        self.assertNotIn(f"factory/{run_id}", self.git("branch"))
+
+    def test_new_refuses_run_branch(self):
+        self.git("switch", "-q", "-c", "factory/x")
         self.assertIn("run branch", self.run_state("new", "a", "-", ok=False).stderr)
         self.assertEqual([p.name for p in (self.repo / ".factory/runs").iterdir()], [self.id])
 
-    def test_new_in_worktree(self):
+    def test_runs_are_shared_across_worktrees(self):
         wt = self.repo / "wt"
-        subprocess.run(["git", "worktree", "add", "-q", "-b", "side", str(wt)], cwd=self.repo, check=True)
-        r = subprocess.run(["python3", str(STATE), "new", "w", "-"], cwd=wt, input="x",
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue((wt / ".factory/runs" / r.stdout.split()[0] / "state.json").exists())
-        self.assertIn(".factory/", (self.repo / ".git/info/exclude").read_text())
+        self.git("worktree", "add", "-q", "-b", "side", str(wt))
+        run_id = self.run_state("new", "w", "-", input="x", cwd=wt).stdout.split()[0]
+        self.assertTrue((self.repo / ".factory/runs" / run_id / "state.json").exists())
+        self.assertEqual(self.run_state("get", run_id, "base_branch").stdout.strip(), "side")
+        listed = self.run_state("list", cwd=self.repo / ".factory/worktrees" / self.id).stdout
+        self.assertIn(run_id, listed)
+        self.assertIn(self.id, listed)
+
+    def test_release_removes_worktree_and_keeps_branch(self):
+        wt = self.repo / ".factory/worktrees" / self.id
+        self.assertIn("done or aborted", self.run_state("release", self.id, ok=False).stderr)
+        self.advance("aborted")
+        (wt / "stray.txt").write_text("x")
+        self.assertIn("could not remove", self.run_state("release", self.id, ok=False).stderr)
+        (wt / "stray.txt").unlink()
+        self.run_state("release", self.id)
+        self.assertFalse(wt.exists())
+        self.assertIn(f"factory/{self.id}", self.git("branch"))
+        self.assertIn("already removed", self.run_state("release", self.id).stdout)
 
     def test_advance_guards(self):
         self.assertIn("without advancing", self.run_state("advance", self.id, "triage", ok=False).stderr)
@@ -74,10 +113,11 @@ class StateTest(unittest.TestCase):
         self.advance("done")
 
     def test_set_guards(self):
-        for field in ("stage", "rounds", "loop", "history", "id", "repo", "branch", "base_branch"):
+        for field in ("stage", "rounds", "loop", "history", "id", "repo", "branch", "base_branch", "worktree"):
             self.run_state("set", self.id, field, "x", ok=False)
         self.run_state("set", self.id, "pr_url", "http://x")
-        self.assertEqual(self.state()["pr_url"], "http://x")
+        self.run_state("set", self.id, "report_url", "http://x#c")
+        self.assertEqual((self.state()["pr_url"], self.state()["report_url"]), ("http://x", "http://x#c"))
 
     def test_review_attempts_count_consecutive_change_requests(self):
         out = self.advance("spec", "checkpoint-1", "implement", "review", "implement", "review",
@@ -110,7 +150,59 @@ class StateTest(unittest.TestCase):
 
     def test_list_marks_waiting_runs(self):
         self.advance("spec", "checkpoint-1")
-        self.assertIn("waiting on human", self.run_state("list").stdout)
+        self.assertIn("waiting on human for 0m", self.run_state("list").stdout)
+
+    def test_notify_on_human_stages_and_done(self):
+        log = self.repo.parent / f"{self.repo.name}-notify.log"
+        env = {"FACTORY_NOTIFY": f'cat >> "{log}"; echo >> "{log}"; echo "$FACTORY_STAGE" >> "{log}"'}
+        self.run_state("set", self.id, "input_summary", "Fix login")
+        for stage in ("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship"):
+            self.run_state("advance", self.id, stage, "triage questions" if stage == "checkpoint-1" else "", env=env)
+        self.run_state("set", self.id, "pr_url", "https://example.test/pr/1")
+        self.run_state("advance", self.id, "done", env=env)
+        lines = log.read_text().splitlines()
+        log.unlink()
+        self.assertEqual(lines[1::2], ["checkpoint-1", "checkpoint-2", "done"])
+        first, last = json.loads(lines[0]), json.loads(lines[4])
+        self.assertEqual((first["id"], first["from"], first["note"]), (self.id, "spec", "triage questions"))
+        self.assertEqual(first["message"], f"factory {self.id}: waiting on you at checkpoint-1 (triage questions) - Fix login")
+        self.assertIn("PR opened https://example.test/pr/1", last["message"])
+
+    def test_notify_from_git_config_and_failure_is_a_warning(self):
+        self.git("config", "factory.notify", "echo boom >&2; exit 3")
+        r = self.run_state("advance", self.id, "blocked", "need a key")
+        self.assertIn("notify command exited 3: boom", r.stderr)
+        self.assertEqual(self.state()["stage"], "blocked")
+
+    def test_pr_report(self):
+        folder = self.repo / ".factory/runs" / self.id
+        (folder / "spec.md").write_text("# Spec: x\n\n## Acceptance criteria\n"
+                                        "- [ ] AC1: Login works | fast. **Verify by:** run it\n- [ ] AC2: Errors show\n")
+        (folder / "verification.md").write_text("Verdict: fail\nSuite: pass\n### AC1: a\nResult: verified\n"
+                                                "### AC2: b\nResult: unverifiable\n")
+        (folder / "review.md").write_text("# Review\n\nVerdict: approve\n")
+        (folder / "evidence").mkdir()
+        (folder / "evidence/login.png").write_bytes(b"png")
+        self.run_state("set", self.id, "input_summary", "Fix login")
+        report = self.run_state("pr-report", self.id).stdout
+        self.assertTrue(report.startswith(f"<!-- factory-run: {self.id} -->"))
+        self.assertIn("**Verification:** fail · test suite pass", report)
+        self.assertIn("| **AC1** Login works \\| fast. | ✅ verified |", report)
+        self.assertIn("| **AC2** Errors show | ⚠️ unverifiable |", report)
+        self.assertIn("**Review:** approve", report)
+        self.assertIn("<details><summary>Approved spec</summary>\n\n# Spec: x", report)
+        self.assertNotIn("Human feedback", report)
+        self.assertIn("- `evidence/login.png`", report)
+
+    def test_pr_report_fits_comment_limit_and_tolerates_bad_verification(self):
+        folder = self.repo / ".factory/runs" / self.id
+        (folder / "spec.md").write_text("## Acceptance criteria\n- [ ] AC1: x\n" + "s" * 50000)
+        (folder / "verification.md").write_text("garbage\n" + "v" * 50000)
+        report = self.run_state("pr-report", self.id).stdout
+        self.assertLess(len(report), 65536)
+        self.assertIn("report did not validate", report)
+        self.assertIn("Truncated to fit", report)
+        self.assertIn("`verification.md` in the run folder", report)
 
     def test_new_refuses_detached_head(self):
         subprocess.run(["git", "switch", "-q", "--detach", "HEAD"], cwd=self.repo, check=True)

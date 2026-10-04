@@ -38,24 +38,30 @@ CHECKPOINT 3 (steer) is available at every pause and whenever a stage escalates.
 
 ## The run folder and the state helper
 
-All state lives in `<repo>/.factory/runs/<run-id>/`. It's how a run survives a dead session or a full context window. **The run folder is the source of truth, not your memory of the conversation.**
+All state lives in `<main checkout>/.factory/runs/<run-id>/`. It's how a run survives a dead session or a full context window. **The run folder is the source of truth, not your memory of the conversation.**
 
 ```
 input.md  state.json  triage.md  spec.md  feedback.md
-implementation.md  review.md  verification.md  evidence/
+implementation.md  review.md  verification.md  evidence/  pr-report.md
 ```
+
+**Each run works in its own Git worktree** at `.factory/worktrees/<run-id>/`, on its run branch. The human's checkout never switches branches, can stay dirty, and can start more runs while one waits at a checkpoint. `repo` in `state.json` is the run's worktree. Run every git, test, and build command for the run there, including your own (`git diff`, `git push`), never in the human's checkout. A run created with `--in-place`, or before worktrees existed (no `worktree` field), has `worktree: null` and works in the human's checkout instead. The steps below say where that differs.
 
 **Never edit `state.json` by hand.** Use the helper at `scripts/state.py` in this skill's base directory (the directory containing this `SKILL.md`). Below it's written as `STATE`. Run it with `python3`, from inside the target repo.
 
 | Command | What it does |
 |---|---|
-| `STATE new <slug> -` (input on stdin) | Creates the run. It checks the tree is clean, adds `.factory/` to `.git/info/exclude`, and records `repo`, `base_branch`, and `branch`. Prints the run ID and the folder. |
-| `STATE list` | Lists every run with its stage, marking the ones waiting on a human. |
+| `STATE new <slug> -` (input on stdin) | Creates the run and its worktree on a new run branch from the current branch. Adds `.factory/` to `.git/info/exclude` and records `repo`, `worktree`, `base_branch`, and `branch`. Prints the run ID, the run folder, and `repo`. Add `--in-place` to work in the current checkout instead; that requires a clean tree. |
+| `STATE list` | Lists every run with its stage, marking the ones waiting on a human and for how long. |
 | `STATE show <id>` / `STATE get <id> <field>` | Reads state, e.g. `get <id> rounds.review`. |
 | `STATE advance <id> <stage> "<note>"` | Moves to a stage and logs it. Entering spec, implement, review, or verify bumps that stage's round. For review and verify it also prints the attempt against the cap, e.g. `review round 4 (attempt 2 of 3)`, and adds `LAST ATTEMPT` on the final one. |
-| `STATE set <id> <field> <value>` | Sets `input_summary` or `pr_url`. |
+| `STATE set <id> <field> <value>` | Sets `input_summary`, `pr_url`, or `report_url`. |
 | `STATE feedback <id> "<heading>"` (text on stdin) | Appends to `feedback.md`. |
 | `STATE check-verification <id>` | Validates the suite result and exactly one result for every acceptance criterion; prints JSON. |
+| `STATE pr-report <id>` | Prints the PR comment: the per-criterion results table, the review verdict, rounds, and the spec, verification, review, and feedback in collapsible sections, sized to fit GitHub's comment limit. |
+| `STATE release <id>` | Removes a done or aborted run's worktree and keeps its branch. Refuses if the worktree has uncommitted changes. |
+
+**Notifications.** `advance` into `checkpoint-1`, `checkpoint-2`, `blocked`, or `done` runs the human's notify command, if one is configured (`FACTORY_NOTIFY` or `git config factory.notify`). You don't send these yourself. A notify failure prints a warning and never fails the advance; mention the warning to the human once and carry on.
 
 `stage` always names the **next thing to do**. Call `advance` *before* you dispatch a stage. If the session dies mid-stage, resuming then re-runs that stage.
 
@@ -73,8 +79,8 @@ Log feedback under consistent headings: `Checkpoint 1: round N`, `Checkpoint 2: 
 
 ## Step 1: New run
 
-1. Pick a 2–5 word kebab-case slug from the input. Pipe the raw input into `STATE new <slug> -`. If that fails because the tree is dirty, stop and ask the human to commit or stash. Don't touch their changes.
-2. Tell the human the run ID in one line. They can resume with `/factory <run-id>`.
+1. Pick a 2–5 word kebab-case slug from the input. Pipe the raw input into `STATE new <slug> -`. Add `--in-place` only if the human asked to work in their checkout. If creating the worktree fails, show the error and ask whether to retry with `--in-place`; don't fall back on your own, because that switches the human's checkout. If an `--in-place` run fails because the tree is dirty, stop and ask the human to commit or stash. Don't touch their changes.
+2. Tell the human the run ID and the worktree path in one line. They can resume with `/factory <run-id>`. Uncommitted changes in their checkout are not part of the run, which starts from the last commit on `base_branch`; if `git status` there is dirty, say so in the same line.
 
 ## Step 2: Drive stages
 
@@ -117,7 +123,7 @@ Then get the answer. See "Asking at a checkpoint" below. Outcomes:
 - **abort** → `advance <id> aborted` and stop.
 
 ### implement
-If the run branch doesn't exist yet, create it: `git switch -c <branch> <base_branch>`. Otherwise `git switch <branch>`. This also covers a round 1 that died partway through. If the tree is dirty when you resume a dead implement stage, leave the changes: the agent will either finish them or discard them. Then dispatch the implement stage. It commits its own work.
+With a worktree, the run branch is already checked out in `repo`; don't switch anything. For an in-place run, if the run branch doesn't exist yet, create it: `git switch -c <branch> <base_branch>`. Otherwise `git switch <branch>`. This also covers a round 1 that died partway through. If the tree is dirty when you resume a dead implement stage, leave the changes: the agent will either finish them or discard them. Then dispatch the implement stage. It commits its own work.
 - `Status: done` → first check that run files didn't leak into the branch: `git diff --name-only <base_branch>...<branch> -- .factory` must be empty. If it isn't, don't advance. Re-dispatch implement (without advancing) and tell it to remove `.factory/` from the branch with `git rm -r --cached`. Once the check is clean, `advance <id> review`.
 - `Status: blocked` → `advance <id> blocked "<question>"`, then Checkpoint 3.
 
@@ -157,11 +163,13 @@ Then get the answer. Outcomes:
 2. If no PR exists, inspect the installed skills available in this session. If an applicable skill is specifically for creating or opening PRs, **use that skill by default**: read its instructions and follow its PR workflow. Give it the repository, exact head and base branches, run ID, spec summary, acceptance criteria, verification summary, and review notes the human accepted. The PR title comes from the spec summary; the body includes those items. The human's **Ship** answer already authorizes the push and PR creation. Do not separately hand-roll `git push` or PR creation when the skill handles them. Do not let the PR skill merge or deploy; this factory stops at the PR. A skill for reviewing, monitoring, or merging PRs is not a PR creation skill.
 3. If no applicable PR creation skill is installed, use the available GitHub tooling: `git push -u origin <branch>`, then open the PR against `base_branch` with the title and body above. Whether using a skill or generic tooling, preserve the exact head/base match, avoid a duplicate PR, and get the resulting URL.
 4. If pushing, checking for an existing PR, or opening a PR is unavailable or fails, `advance <id> blocked "shipping failed: <reason>"` and use Checkpoint 3. Leave the run branch in place. Do not mark the run done.
-5. `set <id> pr_url <url>` once the PR URL is known, then `advance <id> done`.
-6. `git switch <base_branch>`, so the repo is back where the human started and the next run doesn't branch off this one.
-7. Print the run ID, the PR link, and the rounds used (`get <id> rounds`).
+5. `set <id> pr_url <url>` once the PR URL is known.
+6. **Post the run report** so the PR's reviewers see the approved spec and the evidence, not just the diff. If `report_url` is set, skip this. Otherwise look for an existing comment on the PR containing `<!-- factory-run: <run-id> -->` (a resumed ship may have posted it); if there is one, record its URL. If not, write `STATE pr-report <id> > <run folder>/pr-report.md` and post that file's contents as a PR comment with the available GitHub tooling. If that tooling can attach images, also attach the screenshots the report lists under `evidence/`; otherwise leave the list as it is. Then `set <id> report_url <comment url>`. If posting fails, tell the human where `pr-report.md` is and carry on; a missing report never blocks shipping.
+7. `advance <id> done`.
+8. Leave the human where they started. With a worktree, `STATE release <id>`, run from the human's checkout rather than from inside the worktree it removes (the branch is pushed, so nothing is lost). For an in-place run, `git switch <base_branch>`, so the next run doesn't branch off this one.
+9. Print the run ID, the PR link, the report link, and the rounds used (`get <id> rounds`).
 
-The same applies to `abort`: switch back to `base_branch` and leave the run branch in place.
+The same applies to `abort`: `release` the worktree, or for an in-place run switch back to `base_branch`, and leave the run branch in place. If `release` refuses because the worktree has uncommitted changes, leave it and tell the human its path.
 
 v1 never merges or deploys. Merging is the human's final act.
 

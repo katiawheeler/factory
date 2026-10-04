@@ -6,7 +6,7 @@
 python3 testing/test_state.py
 ```
 
-These cover run creation (including from a worktree), dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
+These cover run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
 
 ## Forcing loop caps and blocked stages with Claude Code stub agents
 
@@ -17,7 +17,7 @@ Real agents rarely loop to a cap, because they escalate first. To test the orche
    mkdir -p .claude/agents && cp <factory>/testing/stub-agents/*.md .claude/agents/
    echo '.claude/' >> "$(git rev-parse --git-path info/exclude)"   # keeps the tree clean for `state.py new`
    ```
-2. Start a run so `.factory/` exists, then write `.factory/stubctl`:
+2. Start a run so `.factory/` exists, then write `.factory/stubctl` in the main checkout (not in the run's worktree):
    ```
    TRIAGE=proceed            # proceed | needs-human | reject
    REVIEW=changes-requested  # approve | changes-requested
@@ -61,5 +61,6 @@ Codex GUI question routing and selection of a dedicated PR creation skill are do
 
 ## Known limitations
 
-- **One active run per working tree.** Runs share the checkout and switch branches in it. While a run waits at ②, the repo is on its branch, and `state.py new` refuses to start another run from there. For parallel runs, use a `git worktree` for each.
+- **In-place runs share the checkout.** A run created with `--in-place` switches the checkout to its branch, so only one can be active there at a time. Default runs each get a worktree and don't have this limit.
+- **Untested end to end:** worktree-per-run, posting the PR report, and notifications are covered by the unit tests above, but have not yet been exercised in a full factory run with real agents.
 - **Long headless runs** can outlive a wrapping tool's timeout. Run them in the background and wait on the PID.

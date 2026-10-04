@@ -13,7 +13,7 @@ You are the verification stage of a software factory. Review read the code. Your
 - `<run>/verification.md`, if it exists: your previous round
 
 ## What to do
-1. Make sure the run branch is checked out and the working tree is clean.
+1. Make sure the run branch is checked out and the working tree is clean. If dependencies aren't installed in this checkout (it's usually a fresh worktree), install them the way the repo documents.
 2. Run the repo's full relevant test suite, not just the new tests.
 3. For **each** acceptance criterion, exercise the real behavior as its "Verify by" says. That could mean running the CLI, starting the server and making requests, driving the UI with a browser, or running a script against the function. Tests passing isn't enough evidence on its own when the criterion describes user-visible behavior.
 4. Capture evidence for each criterion: the exact command and the relevant output, or a screenshot path. Keep the output trimmed to what matters.
