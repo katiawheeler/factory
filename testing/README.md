@@ -6,7 +6,7 @@
 python3 testing/test_state.py
 ```
 
-These cover run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
+These cover run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report (media attached with a gh that supports `--attach`, listed by name without one, oversized files skipped) and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
 
 ## Forcing loop caps and blocked stages with Claude Code stub agents
 

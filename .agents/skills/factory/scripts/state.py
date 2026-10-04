@@ -18,7 +18,10 @@ Usage:
   state.py set <run-id> <field> <value>  set a top-level field (e.g. pr_url, report_url)
   state.py feedback <run-id> <heading>   append stdin to feedback.md under "## <heading>"
   state.py check-verification <run-id>    validate criterion and suite results
-  state.py pr-report <run-id>            print the PR comment with spec, evidence and review
+  state.py pr-report <run-id> [--no-media]
+                                         write pr-report.md, the PR comment with spec,
+                                         evidence and review; print the gh command that
+                                         posts it with screenshots attached
   state.py release <run-id>              remove a finished run's worktree (keeps the branch)
 
 Entering checkpoint-1, checkpoint-2, blocked or done runs the notify command, if one
@@ -28,6 +31,8 @@ import datetime
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -44,6 +49,11 @@ NOTIFY_STAGES = HUMAN_STAGES | {"done"}
 SETTABLE = ("input_summary", "pr_url", "report_url")
 # GitHub rejects comments over 65536 characters.
 REPORT_LIMIT = 60000
+# Evidence that `gh ... --attach` (gh 2.99+) uploads, with GitHub's per-file size limits.
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+VIDEO_EXTS = {".mp4", ".mov", ".webm"}
+MAX_BYTES = {"image": 10 * 1024 * 1024, "video": 100 * 1024 * 1024}
+MAX_ATTACHMENTS = 20
 
 
 def die(msg):
@@ -324,10 +334,56 @@ def read(folder, name):
     return p.read_text().strip() if p.exists() else ""
 
 
-def cmd_pr_report(run_id):
+def gh_can_attach():
+    if not shutil.which("gh"):
+        return False
+    r = subprocess.run(["gh", "pr", "comment", "--help"], capture_output=True, text=True)
+    return "--attach" in r.stdout
+
+
+def media_section(folder, criteria, attach):
+    """Screenshots and recordings grouped by criterion; returns (markdown lines, paths to attach)."""
+    files = sorted(p for p in (folder / "evidence").rglob("*")
+                   if p.is_file() and p.suffix.lower() in IMAGE_EXTS | VIDEO_EXTS) \
+        if (folder / "evidence").exists() else []
+    if not files:
+        return [], []
+    if not attach:
+        names = ", ".join(f"`{p.relative_to(folder).as_posix()}`" for p in files)
+        return ["", "### Screenshots and recordings", "",
+                f"Not uploaded; they are in the run folder: {names}"], []
+    uploads, skipped = [], []
+    for p in files:
+        kind = "image" if p.suffix.lower() in IMAGE_EXTS else "video"
+        if p.stat().st_size > MAX_BYTES[kind] or len(uploads) >= MAX_ATTACHMENTS:
+            skipped.append(p)
+        else:
+            uploads.append(p)
+    groups = {}
+    for p in uploads:
+        m = re.match(r"(AC\d+)[-_ .]", p.name, re.IGNORECASE)
+        groups.setdefault(m.group(1).upper() if m else None, []).append(p)
+    out = ["", "### Screenshots and recordings"]
+    for ac in sorted(groups, key=lambda k: (k is None, int(k[2:]) if k else 0)):
+        out += ["", f"**{ac}** {criteria.get(ac, '')}".rstrip() if ac else "**Other**"]
+        for p in groups[ac]:
+            rel = p.relative_to(folder).as_posix()
+            alt = re.sub(r"^AC\d+[-_ .]*", "", p.stem, flags=re.IGNORECASE).replace("-", " ").replace("_", " ")
+            # gh rewrites each local reference in place; a video renders as a player only alone in its paragraph.
+            out += ["", f"![{ac + ': ' if ac else ''}{alt}]({rel})" if p.suffix.lower() in IMAGE_EXTS else rel]
+    if skipped:
+        names = ", ".join(f"`{p.relative_to(folder).as_posix()}`" for p in skipped)
+        out += ["", f"_Not uploaded (over GitHub's size limit or the {MAX_ATTACHMENTS}-file cap); "
+                    f"in the run folder: {names}_"]
+    return out, [p.relative_to(folder).as_posix() for p in uploads]
+
+
+def cmd_pr_report(run_id, no_media=False):
     """The PR comment: what a reviewer needs to trust the run without the run folder."""
     path, s = load(run_id)
     folder = path.parent
+    if not s.get("pr_url"):
+        die("set pr_url before writing the PR report")
     spec, review, feedback = read(folder, "spec.md"), read(folder, "review.md"), read(folder, "feedback.md")
     verification = read(folder, "verification.md")
     criteria = dict(re.findall(r"^- \[[ xX]\] (AC\d+): *(.*?)(?: *\*\*Verify by:\*\*.*)?$", spec, re.MULTILINE))
@@ -350,11 +406,8 @@ def cmd_pr_report(run_id):
         out += [f"**Review:** {m.group(1)}", ""]
     r = s["rounds"]
     out += [f"**Rounds:** spec {r['spec']} · implement {r['implement']} · review {r['review']} · verify {r['verify']}", ""]
-    evidence = sorted(p.relative_to(folder).as_posix() for p in (folder / "evidence").rglob("*") if p.is_file()) \
-        if (folder / "evidence").exists() else []
-    tail = []
-    if evidence:
-        tail = ["", "Evidence files in the run folder (not uploaded):", ""] + [f"- `{e}`" for e in evidence]
+    gh = shutil.which("gh")
+    tail, uploads = media_section(folder, criteria, attach=not no_media and gh_can_attach())
     budget = REPORT_LIMIT - len("\n".join(out + tail))
     for title, name, body in (("Approved spec", "spec.md", spec), ("Verification evidence", "verification.md", verification),
                               ("Code review", "review.md", review), ("Human feedback", "feedback.md", feedback)):
@@ -370,7 +423,13 @@ def cmd_pr_report(run_id):
         section = f"<details><summary>{title}</summary>\n\n{body}\n\n</details>\n"
         budget -= len(section)
         out.append(section)
-    print("\n".join(out + tail).rstrip())
+    report = folder / "pr-report.md"
+    report.write_text("\n".join(out + tail).rstrip() + "\n")
+    print(report)
+    if gh:
+        # Run from the run folder: --attach paths and the references in the body are relative to it.
+        attach = "".join(f" --attach {shlex.quote(u)}" for u in uploads)
+        print(f"cd {shlex.quote(str(folder))} && gh pr comment {shlex.quote(s['pr_url'])} --body-file pr-report.md{attach}")
 
 
 def cmd_release(run_id):
@@ -413,6 +472,8 @@ def main(argv):
     fn, nargs = COMMANDS[name]
     if name == "new" and args[2:] == ["--in-place"]:
         return fn(*args[:2], in_place=True)
+    if name == "pr-report" and args[1:] == ["--no-media"]:
+        return fn(args[0], no_media=True)
     if name == "advance" and len(args) in (2, 3):
         return fn(*args)
     if len(args) != nargs:

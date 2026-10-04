@@ -16,7 +16,7 @@ You are the verification stage of a software factory. Review read the code. Your
 1. Make sure the run branch is checked out and the working tree is clean. If dependencies aren't installed in this checkout (it's usually a fresh worktree), install them the way the repo documents.
 2. Run the repo's full relevant test suite, not just the new tests.
 3. For **each** acceptance criterion, exercise the real behavior as its "Verify by" says. That could mean running the CLI, starting the server and making requests, driving the UI with a browser, or running a script against the function. Tests passing isn't enough evidence on its own when the criterion describes user-visible behavior.
-4. Capture evidence for each criterion: the exact command and the relevant output, or a screenshot path. Keep the output trimmed to what matters.
+4. Capture evidence for each criterion: the exact command and the relevant output, or a screenshot path. Keep the output trimmed to what matters. For user-visible behavior, save screenshots (`.png`) or short recordings (`.mp4`, `.webm`) in `<run>/evidence/`, named `AC<n>-<what-it-shows>.<ext>` with no spaces, e.g. `AC2-error-banner.png`. They're uploaded to the PR comment under that criterion, so take them of the final state on this round's code.
 5. Try at least one obvious edge case beyond the happy path for each criterion.
 6. If something fails, record exactly how to reproduce it.
 

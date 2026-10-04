@@ -174,7 +174,17 @@ class StateTest(unittest.TestCase):
         self.assertIn("notify command exited 3: boom", r.stderr)
         self.assertEqual(self.state()["stage"], "blocked")
 
-    def test_pr_report(self):
+    def fake_gh(self, supports_attach):
+        """A gh on PATH whose `pr comment --help` does or doesn't list --attach (added in gh 2.99)."""
+        bin_dir = self.repo.parent / f"{self.repo.name}-bin-{supports_attach}"
+        bin_dir.mkdir(exist_ok=True)
+        gh = bin_dir / "gh"
+        gh.write_text("#!/bin/sh\necho '  -F, --body-file file'\n" + ("echo '      --attach path'\n" if supports_attach else ""))
+        gh.chmod(0o755)
+        self.addCleanup(lambda: (gh.unlink(), bin_dir.rmdir()))
+        return {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    def report_run(self):
         folder = self.repo / ".factory/runs" / self.id
         (folder / "spec.md").write_text("# Spec: x\n\n## Acceptance criteria\n"
                                         "- [ ] AC1: Login works | fast. **Verify by:** run it\n- [ ] AC2: Errors show\n")
@@ -182,9 +192,23 @@ class StateTest(unittest.TestCase):
                                                 "### AC2: b\nResult: unverifiable\n")
         (folder / "review.md").write_text("# Review\n\nVerdict: approve\n")
         (folder / "evidence").mkdir()
-        (folder / "evidence/login.png").write_bytes(b"png")
+        for name in ("AC1-login-page.png", "AC2_error.mp4", "overview.png", "run.log"):
+            (folder / "evidence" / name).write_bytes(b"x")
         self.run_state("set", self.id, "input_summary", "Fix login")
-        report = self.run_state("pr-report", self.id).stdout
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        return folder
+
+    def test_pr_report_requires_pr_url(self):
+        self.assertIn("pr_url", self.run_state("pr-report", self.id, ok=False).stderr)
+
+    def test_pr_report_attaches_media_with_gh(self):
+        folder = self.report_run()
+        out = self.run_state("pr-report", self.id, env=self.fake_gh(True)).stdout.splitlines()
+        self.assertEqual(out[0], str(folder / "pr-report.md"))
+        self.assertEqual(out[1], f"cd {folder} && gh pr comment https://github.com/o/r/pull/7 --body-file pr-report.md"
+                                 " --attach evidence/AC1-login-page.png --attach evidence/AC2_error.mp4"
+                                 " --attach evidence/overview.png")
+        report = (folder / "pr-report.md").read_text()
         self.assertTrue(report.startswith(f"<!-- factory-run: {self.id} -->"))
         self.assertIn("**Verification:** fail · test suite pass", report)
         self.assertIn("| **AC1** Login works \\| fast. | ✅ verified |", report)
@@ -192,13 +216,35 @@ class StateTest(unittest.TestCase):
         self.assertIn("**Review:** approve", report)
         self.assertIn("<details><summary>Approved spec</summary>\n\n# Spec: x", report)
         self.assertNotIn("Human feedback", report)
-        self.assertIn("- `evidence/login.png`", report)
+        self.assertIn("**AC1** Login works | fast.\n\n![AC1: login page](evidence/AC1-login-page.png)\n\n"
+                      "**AC2** Errors show\n\nevidence/AC2_error.mp4\n\n**Other**\n\n![overview](evidence/overview.png)\n",
+                      report)
+        self.assertNotIn("run.log", report)
+
+    def test_pr_report_without_attach_support_lists_media(self):
+        folder = self.report_run()
+        for env, args in ((self.fake_gh(False), ()), (self.fake_gh(True), ("--no-media",))):
+            out = self.run_state("pr-report", self.id, *args, env=env).stdout.splitlines()
+            self.assertEqual(out[1], f"cd {folder} && gh pr comment https://github.com/o/r/pull/7 --body-file pr-report.md")
+            report = (folder / "pr-report.md").read_text()
+            self.assertIn("Not uploaded; they are in the run folder: `evidence/AC1-login-page.png`", report)
+            self.assertNotIn("![", report)
+
+    def test_pr_report_skips_oversized_media(self):
+        folder = self.report_run()
+        with (folder / "evidence/AC1-huge.png").open("wb") as f:
+            f.truncate(11 * 1024 * 1024)
+        out = self.run_state("pr-report", self.id, env=self.fake_gh(True)).stdout
+        self.assertNotIn("AC1-huge.png", out)
+        self.assertIn("_Not uploaded (over GitHub's size limit", (folder / "pr-report.md").read_text())
 
     def test_pr_report_fits_comment_limit_and_tolerates_bad_verification(self):
         folder = self.repo / ".factory/runs" / self.id
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
         (folder / "spec.md").write_text("## Acceptance criteria\n- [ ] AC1: x\n" + "s" * 50000)
         (folder / "verification.md").write_text("garbage\n" + "v" * 50000)
-        report = self.run_state("pr-report", self.id).stdout
+        self.run_state("pr-report", self.id)
+        report = (folder / "pr-report.md").read_text()
         self.assertLess(len(report), 65536)
         self.assertIn("report did not validate", report)
         self.assertIn("Truncated to fit", report)
