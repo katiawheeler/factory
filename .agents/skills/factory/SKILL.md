@@ -146,6 +146,7 @@ Present:
 - `git diff --stat <base_branch>...<branch>` and the commit list
 - the review verdict, plus any non-blocking notes that affect risk, like missing tests
 - the verification verdict, the per-criterion results, and the path to `verification.md`
+- for UI criteria, each one's `Replay:` command and video path from `verification.md`, so the human can watch or rerun the flow
 - any loop cap that was hit (from the last history note), stated plainly
 
 Then get the answer. Outcomes:

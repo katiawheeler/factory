@@ -221,6 +221,20 @@ class StateTest(unittest.TestCase):
                       report)
         self.assertNotIn("run.log", report)
 
+    def test_pr_report_orders_flow_steps_and_skips_node_modules(self):
+        folder = self.report_run()
+        for name in ("AC1-02-error-banner.png", "AC1-01-form-filled.png", "AC1-flow.webm", "AC1-trace.zip",
+                     "node_modules/pkg/icon.png"):
+            (folder / "evidence" / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / "evidence" / name).write_bytes(b"x")
+        out = self.run_state("pr-report", self.id, env=self.fake_gh(True)).stdout
+        report = (folder / "pr-report.md").read_text()
+        self.assertIn("![AC1: step 1: form filled](evidence/AC1-01-form-filled.png)\n\n"
+                      "![AC1: step 2: error banner](evidence/AC1-02-error-banner.png)\n\n"
+                      "evidence/AC1-flow.webm\n\n![AC1: login page]", report)
+        self.assertNotIn("node_modules", out + report)
+        self.assertNotIn("trace.zip", out)
+
     def test_pr_report_without_attach_support_lists_media(self):
         folder = self.report_run()
         for env, args in ((self.fake_gh(False), ()), (self.fake_gh(True), ("--no-media",))):
