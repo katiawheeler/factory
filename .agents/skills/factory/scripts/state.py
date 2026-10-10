@@ -409,7 +409,11 @@ def cmd_pr_report(run_id, no_media=False):
     r = s["rounds"]
     out += [f"**Rounds:** spec {r['spec']} · implement {r['implement']} · review {r['review']} · verify {r['verify']}", ""]
     gh = shutil.which("gh")
-    tail, uploads = media_section(folder, criteria, attach=not no_media and gh_can_attach())
+    attach = not no_media and gh_can_attach()
+    tail, uploads = media_section(folder, criteria, attach=attach)
+    if gh and tail and not no_media and not attach:
+        print("warning: this gh has no `pr comment --attach` (added in gh 2.99), so media are only listed by name; "
+              "upgrade gh and rerun pr-report", file=sys.stderr)
     budget = REPORT_LIMIT - len("\n".join(out + tail))
     for title, name, body in (("Approved spec", "spec.md", spec), ("Verification evidence", "verification.md", verification),
                               ("Code review", "review.md", review), ("Human feedback", "feedback.md", feedback)):

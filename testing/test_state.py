@@ -237,12 +237,15 @@ class StateTest(unittest.TestCase):
 
     def test_pr_report_without_attach_support_lists_media(self):
         folder = self.report_run()
-        for env, args in ((self.fake_gh(False), ()), (self.fake_gh(True), ("--no-media",))):
+        old_gh = self.fake_gh(False)
+        for env, args in ((old_gh, ()), (self.fake_gh(True), ("--no-media",))):
             out = self.run_state("pr-report", self.id, *args, env=env).stdout.splitlines()
             self.assertEqual(out[1], f"cd {folder} && gh pr comment https://github.com/o/r/pull/7 --body-file pr-report.md")
             report = (folder / "pr-report.md").read_text()
             self.assertIn("Not uploaded; they are in the run folder: `evidence/AC1-login-page.png`", report)
             self.assertNotIn("![", report)
+        self.assertIn("upgrade gh", self.run_state("pr-report", self.id, env=old_gh).stderr)
+        self.assertNotIn("upgrade gh", self.run_state("pr-report", self.id, "--no-media", env=old_gh).stderr)
 
     def test_pr_report_skips_oversized_media(self):
         folder = self.report_run()
