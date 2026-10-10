@@ -229,11 +229,25 @@ class StateTest(unittest.TestCase):
             (folder / "evidence" / name).write_bytes(b"x")
         out = self.run_state("pr-report", self.id, env=self.fake_gh(True)).stdout
         report = (folder / "pr-report.md").read_text()
-        self.assertIn("![AC1: step 1: form filled](evidence/AC1-01-form-filled.png)\n\n"
-                      "![AC1: step 2: error banner](evidence/AC1-02-error-banner.png)\n\n"
-                      "evidence/AC1-flow.webm\n\n![AC1: login page]", report)
+        self.assertIn("**AC1** Login works | fast.\n\n![AC1: step 2: error banner](evidence/AC1-02-error-banner.png)"
+                      "\n\nevidence/AC1-flow.webm\n\n**AC2**", report)
+        self.assertIn("_2 more screenshots and recordings (earlier steps and edge cases)", report)
+        for name in ("AC1-01-form-filled", "AC1-login-page"):
+            self.assertNotIn(name, out)
         self.assertNotIn("node_modules", out + report)
         self.assertNotIn("trace.zip", out)
+
+    def test_pr_report_attaches_one_screenshot_and_recording_per_criterion(self):
+        folder = self.report_run()
+        for name in ("AC2_error.mp4", "overview.png", "AC1-login-page.png"):
+            (folder / "evidence" / name).unlink()
+        for name in ("AC1-01-start.png", "AC1-10-done.png", "AC1-02-mid.png", "AC1-03-edge-x.png",
+                     "AC1-edge-flow.webm", "AC1-flow.webm", "AC2-01-edge-only.png", "AC2-edge-flow.webm"):
+            (folder / "evidence" / name).write_bytes(b"x")
+        out = self.run_state("pr-report", self.id, env=self.fake_gh(True)).stdout.splitlines()
+        self.assertEqual(out[1].split(" --attach ")[1:], ["evidence/AC1-10-done.png", "evidence/AC1-flow.webm",
+                                                          "evidence/AC2-01-edge-only.png", "evidence/AC2-edge-flow.webm"])
+        self.assertIn("_4 more screenshots and recordings", (folder / "pr-report.md").read_text())
 
     def test_pr_report_without_attach_support_lists_media(self):
         folder = self.report_run()
@@ -249,10 +263,10 @@ class StateTest(unittest.TestCase):
 
     def test_pr_report_skips_oversized_media(self):
         folder = self.report_run()
-        with (folder / "evidence/AC1-huge.png").open("wb") as f:
+        with (folder / "evidence/AC3-huge.png").open("wb") as f:
             f.truncate(11 * 1024 * 1024)
         out = self.run_state("pr-report", self.id, env=self.fake_gh(True)).stdout
-        self.assertNotIn("AC1-huge.png", out)
+        self.assertNotIn("AC3-huge.png", out)
         self.assertIn("_Not uploaded (over GitHub's size limit", (folder / "pr-report.md").read_text())
 
     def test_pr_report_fits_comment_limit_and_tolerates_bad_verification(self):

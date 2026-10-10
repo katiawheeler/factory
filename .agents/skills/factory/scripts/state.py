@@ -341,6 +341,35 @@ def gh_can_attach():
     return "--attach" in r.stdout
 
 
+def step_number(p):
+    """The step in a flow screenshot's name (AC2-03-banner.png -> 3), or -1 for an unnumbered one."""
+    m = re.match(r"AC\d+[-_ .]+0*(\d+)[-_ .]", p.name, re.IGNORECASE)
+    return int(m.group(1)) if m else -1
+
+
+def pick_media(files):
+    """One screenshot and one recording per criterion, the rest stay in the run folder.
+
+    The screenshot is the main flow's last numbered step (its end state); the recording is AC<n>-flow.
+    Edge-case media are used only when a criterion has nothing else. Files without a criterion are all kept.
+    """
+    groups, picked = {}, []
+    for p in files:
+        m = re.match(r"(AC\d+)[-_ .]", p.name, re.IGNORECASE)
+        if m:
+            groups.setdefault(m.group(1).upper(), []).append(p)
+        else:
+            picked.append(p)
+    for ps in groups.values():
+        for exts in (IMAGE_EXTS, VIDEO_EXTS):
+            kind = [p for p in ps if p.suffix.lower() in exts]
+            main = [p for p in kind if "edge" not in p.stem.lower()] or kind
+            if main:
+                flow = [p for p in main if re.fullmatch(r"AC\d+[-_ .]flow", p.stem, re.IGNORECASE)]
+                picked.append(flow[0] if flow else max(main, key=lambda p: (step_number(p), p.name)))
+    return sorted(picked)
+
+
 def media_section(folder, criteria, attach):
     """Screenshots and recordings grouped by criterion; returns (markdown lines, paths to attach)."""
     files = sorted(p for p in (folder / "evidence").rglob("*")
@@ -353,8 +382,9 @@ def media_section(folder, criteria, attach):
         names = ", ".join(f"`{p.relative_to(folder).as_posix()}`" for p in files)
         return ["", "### Screenshots and recordings", "",
                 f"Not uploaded; they are in the run folder: {names}"], []
+    picked = pick_media(files)
     uploads, skipped = [], []
-    for p in files:
+    for p in picked:
         kind = "image" if p.suffix.lower() in IMAGE_EXTS else "video"
         if p.stat().st_size > MAX_BYTES[kind] or len(uploads) >= MAX_ATTACHMENTS:
             skipped.append(p)
@@ -377,6 +407,9 @@ def media_section(folder, criteria, attach):
         names = ", ".join(f"`{p.relative_to(folder).as_posix()}`" for p in skipped)
         out += ["", f"_Not uploaded (over GitHub's size limit or the {MAX_ATTACHMENTS}-file cap); "
                     f"in the run folder: {names}_"]
+    if len(files) > len(picked):
+        out += ["", f"_{len(files) - len(picked)} more screenshots and recordings (earlier steps and edge cases) "
+                    "are in the run folder's `evidence/`._"]
     return out, [p.relative_to(folder).as_posix() for p in uploads]
 
 
