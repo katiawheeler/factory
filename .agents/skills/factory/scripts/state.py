@@ -559,6 +559,7 @@ GITHUB_URL = re.compile(r"https://github\.com/([^/\s]+)/([^/\s]+)/(issues|pull)/
 WRITE_PERMISSIONS = {"admin", "maintain", "write"}
 # Every comment the factory posts carries this, so it never reads its own posts back as input.
 MARKER = "<!-- factory"
+ANSWER_KEYWORDS = ("approve", "ship", "abort", "pause", "steer")
 COMMAND = re.compile(r"\A\s*/factory(?:\s+|\Z)(.*)\Z", re.DOTALL)
 
 
@@ -721,7 +722,7 @@ def cmd_inbox(run_id):
             m = COMMAND.match(item["body"])
             trusted = not item["bot"] and trust(owner, repo, item["author"], item["association"])
             if m:
-                entry = {"answer": m.group(1).strip(), "author": item["author"], "at": item["at"], "url": item["url"]}
+                entry = {"answer": command_answer(m.group(1)), "author": item["author"], "at": item["at"], "url": item["url"]}
                 if not m.group(1).strip():
                     ignored.append({**entry, "reason": "empty /factory command"})
                 elif trusted:
@@ -733,6 +734,14 @@ def cmd_inbox(run_id):
     key = lambda e: e["at"]
     print(json.dumps({"since": since, "threads": urls, "answers": sorted(answers, key=key),
                       "feedback": sorted(feedback, key=key), "ignored": sorted(ignored, key=key)}, indent=2))
+
+
+def command_answer(text):
+    """A /factory command's answer. A keyword alone on the first line is the whole answer, so a
+    signature or footer under `/factory approve` doesn't turn the approval into feedback."""
+    text = text.strip()
+    first = text.split("\n", 1)[0].strip()
+    return first.lower() if first.lower() in ANSWER_KEYWORDS else text
 
 
 def posting_enabled():
