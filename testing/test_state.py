@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -619,7 +620,7 @@ else:
         commit('Revert "Fix login"\n\nReverts o/r#7')
         self.git("push", "-q", "origin", "main")
         env = {"FACTORY_SIGNALS": 'python3 -c "import json,sys; e=json.load(sys.stdin); print(\'errors up after \' + e[\'id\'])"',
-               "PATH": "/usr/bin:/bin"}  # no gh: the merge commit and its checks are unknown
+               "PATH": self.bin_without_gh()}  # no gh: the merge commit and its checks are unknown
         [result] = json.loads(self.run_state("signals", env=env).stdout)
         self.assertEqual(len(result["reverted_by"]), 1)
         self.assertEqual(result["custom"], [f"errors up after {self.id}"])
@@ -629,6 +630,15 @@ else:
         self.assertEqual(json.loads(self.run_state("signals", "--days", "0", env=env).stdout), [])
         stats = json.loads(self.run_state("stats", "--json").stdout)["summary"]
         self.assertEqual((stats["regressions"], stats["merged_runs_checked_for_signals"]), (1, 1))
+
+    def bin_without_gh(self):
+        """A PATH with git and python3 but no gh, wherever the system installs gh."""
+        bin_dir = self.repo.parent / f"{self.repo.name}-nogh"
+        bin_dir.mkdir()
+        self.addCleanup(shutil.rmtree, bin_dir, ignore_errors=True)
+        for name, target in (("git", shutil.which("git")), ("python3", sys.executable)):
+            (bin_dir / name).symlink_to(target)
+        return str(bin_dir)
 
     def test_signals_read_checks_on_the_merge_commit(self):
         self.finished_run()
