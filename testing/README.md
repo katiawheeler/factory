@@ -181,12 +181,13 @@ Use a sample repo with CI on pull requests, and a second GitHub account (or a te
 | Standalone Playwright recipe: screenshots via `EVIDENCE`, video per test, trace on failure, `PW_CHROMIUM` for a mismatched browser | by hand, static page, `@playwright/test` 1.63 | ✅ |
 | Playwright in verify with real agents: standalone and repo-configured, failing flow, faked states, second round, browser mismatch, no browser (Playwright flows 1–7) | not yet run | ⏳ |
 | Land: wait → merged (vibe#22); review comment that changes an AC → needs-human, answered on the PR → fix round (vibe#21); red CI caused by the PR → diagnosed → fix round → green; CI red for reasons outside the PR (npm E401) → needs-human with evidence (vibe#20, #23); bot comments (Vercel, CodeRabbit) not acted on; design question → not a fix; cap: 3 fix rounds → ② (stubs, vibe#19) | real agents, `katiawheeler/vibe` | ✅ |
-| Land: merge conflict fix round; closed without merge (land flows 5, 8) | not yet run: a conflict needs a commit to the base branch | ⏳ |
+| Land: a teammate commit on `main` conflicts with the PR → fix round merges `origin/main` in (merge commit, no rebase or force-push), keeps the approved spec's line → green → merged (vibe#25); PR closed without merging → `closed`, retro, worktree released (vibe#26) | real agents, `katiawheeler/vibe` | ✅ |
 | Answering from GitHub: `/factory approve` and `/factory ship` on the source issue, checkpoints posted on the issue (opt-in), a blocked question answered on the PR, untrusted answer and allowlist (`factory.approvers`) | real agents, `katiawheeler/vibe#18`, `#21`, `#23` | ✅ |
 | Run ledger: usage recorded by the orchestrator, `stats` across 7 runs | real agents, `katiawheeler/vibe` | ✅ |
 | Retro and learnings: lessons from a spec revision, red CI and a needs-human stop; a later run cites a lesson (E401 is not the PR's fault); proposed repo changes offered, not started; retro on abort | real agents, `katiawheeler/vibe` | ✅ |
 | Signals: merge-commit CI read as pass/none, custom signal command → regression → follow-up run with `parent_run`, whose triage asked for evidence instead of guessing | real agents, `katiawheeler/vibe` | ✅ |
-| Signals: a real revert on the base branch (signals flow 1) | not yet run: needs a revert commit on the base branch | ⏳ |
+| Signals: a GitHub-style revert of vibe#24 on `main` → regression with the revert commit, other merged runs clean → follow-up run with `parent_run` (spec auto-approved) → shipped → closed | real agents, `katiawheeler/vibe` | ✅ |
+| Stale base: `new` refused to start the follow-up while local `main` was 3 commits behind, and said to pull | real agents, `katiawheeler/vibe` | ✅ |
 | Auto-approval: specs with open questions stop at ① (2 runs); an unambiguous chore is auto-approved, then ships and merges (vibe#24) | real agents, `katiawheeler/vibe` | ✅ |
 
 Codex GUI question routing and selection of a dedicated PR creation skill are documented behavior; they have not yet been exercised in an end-to-end factory run.
