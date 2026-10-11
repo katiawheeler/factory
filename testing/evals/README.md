@@ -44,4 +44,4 @@ work. The runner's own tests use [`fake_agent.py`](fake_agent.py) and cost no mo
 `python3 testing/test_evals.py`.
 
 Real runs take several minutes per case and use model tokens. Run them when you change files in
-`stages/`, `SKILL.md`, or `state.py`'s stage rules, not on every commit.
+`stages/`, `guides/`, `SKILL.md`, or `state.py`'s stage rules, not on every commit.

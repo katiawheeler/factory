@@ -226,7 +226,7 @@ Install with a skills manager that supports your agent, for example:
 npx skills add katiawheeler/factory
 ```
 
-For a manual install, copy the full [source skill directory](.agents/skills/factory/SKILL.md) into your agent's skill directory and invoke it using that agent's convention. Copy the directory rather than a compatibility symlink. A repo can override a stage with a named `factory-<stage>` agent.
+For a manual install, copy the full [source skill directory](.agents/skills/factory/SKILL.md), including `stages/`, `guides/`, and `scripts/`, into your agent's skill directory and invoke it using that agent's convention. Copy the directory rather than a compatibility symlink. A repo can override a stage with a named `factory-<stage>` agent.
 
 After **Ship** approval (or after verify, when `checkpoint-2` is skipped), the factory uses an applicable installed PR creation skill by default to open the PR. If none is available, it uses GitHub tooling directly. On resume it checks for an existing PR before creating one, then records the PR URL in the run state.
 
