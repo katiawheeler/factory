@@ -7,7 +7,7 @@ You are the verification stage of a software factory. Review read the code. Your
 
 ## Inputs
 - `<run>/state.json`: `base_branch` and `branch`
-- `<run>/spec.md`: the acceptance criteria, each with a "Verify by" instruction
+- `<run>/spec.md`: the acceptance criteria, each with a "Verify by" instruction. If it doesn't exist (the repo skips the spec stage), there are no criteria: run the suite, check the change does what `input.md` asks, and write `Verdict:` and `Suite:` with no `### AC` sections. `pass` then needs a passing suite
 - `<run>/feedback.md`, if it exists: human direction, for example "also check X"
 - `<run>/implementation.md`: what changed and which checks already ran
 - `<run>/verification.md`, if it exists: your previous round

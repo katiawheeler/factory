@@ -63,7 +63,7 @@ Next to `runs/`, `.factory/learnings.md` holds what earlier runs learned about t
 | `STATE new <slug> -` (input on stdin) | Creates the run and its worktree on a new run branch from the current branch. Adds `.factory/` to `.git/info/exclude` and records `repo`, `worktree`, `base_branch`, and `branch`. Prints the run ID, the run folder, and `repo`. Add `--in-place` to work in the current checkout instead; that requires a clean tree. Add `--parent <run-id>` for a follow-up to an earlier run. |
 | `STATE list` | Lists every run with its stage, marking the ones waiting on a human and for how long. |
 | `STATE show <id>` / `STATE get <id> <field>` | Reads state, e.g. `get <id> rounds.review`. |
-| `STATE advance <id> <stage> "<note>"` | Moves to a stage and logs it. Entering spec, implement, review, or verify bumps that stage's round. For review and verify it also prints the attempt against the cap, e.g. `review round 4 (attempt 2 of 3)`, and adds `LAST ATTEMPT` on the final one. |
+| `STATE advance <id> <stage> "<note>"` | Moves to a stage and logs it. It refuses moves the loop doesn't make, such as `triage` → `implement`, unless the repo skips the stages in between (see **Skipping stages**). Entering spec, implement, review, or verify bumps that stage's round. For review and verify it also prints the attempt against the cap, e.g. `review round 4 (attempt 2 of 3)`, and adds `LAST ATTEMPT` on the final one. |
 | `STATE set <id> <field> <value>` | Sets `input_summary`, `pr_url`, `report_url`, or `thread_url` (the GitHub issue or PR the run came from). |
 | `STATE feedback <id> "<heading>"` (text on stdin) | Appends to `feedback.md`. |
 | `STATE check-verification <id>` | Validates the suite result and exactly one result for every acceptance criterion; prints JSON. |
@@ -79,6 +79,7 @@ Next to `runs/`, `.factory/learnings.md` holds what earlier runs learned about t
 | `STATE policy <id>` | Whether the repo's policy lets this spec skip checkpoint 1, with the reasons it can't, as JSON. Off unless `git config factory.autoApproveSpec` lists sizes. |
 | `STATE learn <id>` | Merges `retro.md`'s **Learnings** into `.factory/learnings.md`: adds new lessons with their run ID, skips duplicates, removes retired ones. Once per finished run. |
 | `STATE signals [<id>] [--days N]` | For merged runs (by default, merged in the last 14 days): a revert on the base branch, failing checks on the merge commit, and lines from the repo's signal command (`git config factory.signals`). Records the result in `state.json` and prints JSON with `regression` true or false per run. |
+| `STATE skips` | The stages this repo skips (`git config factory.skip`, or `FACTORY_SKIP`), as a JSON list. Empty unless the repo opted in. |
 | `STATE release <id>` | Removes a merged, closed, done, or aborted run's worktree and keeps its branch. Refuses if the worktree has uncommitted changes. |
 
 **Notifications.** `advance` into `checkpoint-1`, `checkpoint-2`, `blocked`, `land`, `merged`, or `closed` runs the human's notify command, if one is configured (`FACTORY_NOTIFY` or `git config factory.notify`). You don't send these yourself. A notify failure prints a warning and never fails the advance; mention the warning to the human once and carry on.
@@ -92,6 +93,8 @@ Next to `runs/`, `.factory/learnings.md` holds what earlier runs learned about t
 Log feedback under consistent headings: `Checkpoint 1: round N`, `Checkpoint 2: round N`, `Steer: <stage>`, `Land: round N`. N is `rounds.spec` for checkpoint 1, `rounds.implement` for checkpoint 2, and `rounds.land` for land.
 
 **Shipping rule.** `state.py` only lets a run into `ship` from checkpoint-2 (the human's **Ship**), from `blocked` (after a steer), or from `verify` when the run already has a PR. That last path is a fix round on a PR the human already approved: it pushes to the same PR, where reviewers still decide whether it merges.
+
+**Skipping stages.** A repo that wants runs to go from input to PR without a human can set `git config factory.skip` to any of `triage`, `spec`, `checkpoint-1`, `review`, `verify`, `checkpoint-2`, or `all`. Skipping `spec` skips `checkpoint-1` too. Implement, ship, and land are never skipped, and the factory still never merges. Read the list once per session with `STATE skips`. Wherever the steps below say to advance along the loop (`triage` → `spec` → `checkpoint-1` → `implement` → `review` → `verify` → `checkpoint-2` → `ship`), advance instead to **the next stage on that path that isn't skipped**, without dispatching or presenting the skipped ones. `advance` checks the list itself, records what was skipped, and refuses to skip into `ship` unless the last check that ran passed (a valid `pass` verification, or review's `approve`). Skipping only replaces the normal path: escalations still stop for a human. Triage's `needs-human` and `reject`, loop caps, `unverifiable` criteria, and `blocked` go to their checkpoints as usual, even when that checkpoint is in the list.
 
 **The ledger.** After each stage dispatch, if the harness reports the subagent's token usage (Claude Code's Agent result does, as `total_tokens`), record it: `STATE usage <id> <stage> <tokens> [usd]`. Skip it silently when the harness doesn't report usage. `STATE stats` reads the ledger.
 
@@ -132,13 +135,13 @@ Don't paste file contents into agent prompts. Agents read the files themselves. 
 If the harness has no subagents at all, run the stage yourself: read `stages/<stage>.md` and follow it with the same run folder, repository, and round. Then continue from its output file as if it were the returned summary. This costs context, so a long run may need a fresh session and a resume sooner.
 
 ### triage
-Dispatch the triage stage. A new run is already at `triage`, so don't advance first. Afterwards, `set <id> input_summary "<one line>"`. If `grep '^Source:' triage.md` names a GitHub issue or PR URL, `set <id> thread_url <url>`. Then act on the verdict:
-- `proceed` → `advance <id> spec`.
+If `triage` is skipped, don't dispatch it: `set <id> input_summary "<one line>"` from the input, set `thread_url` if the input is a GitHub issue or PR URL, and advance to the next stage that isn't skipped. Otherwise dispatch the triage stage. A new run is already at `triage`, so don't advance first. Afterwards, `set <id> input_summary "<one line>"`. If `grep '^Source:' triage.md` names a GitHub issue or PR URL, `set <id> thread_url <url>`. Then act on the verdict:
+- `proceed` → `advance <id> spec` (or the next stage that isn't skipped).
 - `needs-human` → `advance <id> checkpoint-1 "triage questions"`. Present triage's open questions and their suggested defaults using the GUI ask flow below. **At this checkpoint, any answer except abort, pause, or steer goes to spec, never to implement.** There's no spec to approve yet. `approve` means "use triage's defaults". Log the answers under `Checkpoint 1: triage`, then `advance <id> spec`. The spec then gets its own checkpoint-1 approval.
 - `reject` → `advance <id> checkpoint-1 "triage rejected"`, so the run shows as waiting on a human. Show the reason and triage's suggested split using the GUI ask flow below. `abort` ends the run. Any other answer is an override: log it under `Checkpoint 1: triage`, then `advance <id> spec`.
 
 ### spec
-Dispatch the spec stage right after `advance <id> spec`. Then run `STATE policy <id>`:
+If `spec` is skipped, a run that arrives here (after triage questions) goes straight on: `advance <id> implement`. The input is then the contract for implement, review, and verify. Otherwise dispatch the spec stage right after `advance <id> spec`. If `checkpoint-1` is skipped, `advance <id> implement` and tell the human in one line that the spec wasn't reviewed (`factory.skip`). Otherwise run `STATE policy <id>`:
 - `auto_approve_spec: true` → the repo opted in to skipping spec approval for this kind of change (`factory.autoApproveSpec`). `advance <id> implement`; `state.py` checks the policy again and records the note. Tell the human in one line that the spec was auto-approved, why (size and type), and the path to `spec.md`. Then continue at implement. At ship approval, say again that no human approved the spec; the PR report and description say it too.
 - otherwise → `advance <id> checkpoint-1`. Don't show the policy reasons unless the human asks.
 
@@ -156,19 +159,19 @@ Then get the answer. See "Asking at a checkpoint" below. Outcomes:
 
 ### implement
 With a worktree, the run branch is already checked out in `repo`; don't switch anything. For an in-place run, if the run branch doesn't exist yet, create it: `git switch -c <branch> <base_branch>`. Otherwise `git switch <branch>`. This also covers a round 1 that died partway through. If the tree is dirty when you resume a dead implement stage, leave the changes: the agent will either finish them or discard them. Then dispatch the implement stage. It commits its own work.
-- `Status: done` → first check that run files didn't leak into the branch: `git diff --name-only <base_branch>...<branch> -- .factory` must be empty. If it isn't, don't advance. Re-dispatch implement (without advancing) and tell it to remove `.factory/` from the branch with `git rm -r --cached`. Once the check is clean, `advance <id> review`.
+- `Status: done` → first check that run files didn't leak into the branch: `git diff --name-only <base_branch>...<branch> -- .factory` must be empty. If it isn't, don't advance. Re-dispatch implement (without advancing) and tell it to remove `.factory/` from the branch with `git rm -r --cached`. Once the check is clean, `advance <id> review` (or the next stage that isn't skipped: `verify`, then `checkpoint-2`, then `ship`; in a PR fix round, `ship`).
 - `Status: blocked` → `advance <id> blocked "<question>"`, then Checkpoint 3.
 
 ### review
 Dispatch the review stage right after `advance <id> review`. Then read the verdict:
-- `approve` → `advance <id> verify`.
+- `approve` → `advance <id> verify` (or the next stage that isn't skipped).
 - `changes-requested` with attempts left (`loop.review` < 3) → `advance <id> implement "review changes"`.
 - `changes-requested` on the last attempt (`loop.review` ≥ 3) → `advance <id> checkpoint-2 "review did not converge"`.
 
 ### verify
 Dispatch the verify stage right after `advance <id> verify`. Then read the verdict:
 - Run `STATE check-verification <id>` before acting on either verdict. If the report is malformed, re-dispatch verify once without advancing and ask it to correct the report. If it is still malformed, `advance <id> blocked "verification report invalid"` and use Checkpoint 3. Use the validated JSON, not the agent summary, for the decisions below.
-- `pass` → `advance <id> checkpoint-2`. The helper only accepts `pass` when the suite passed and every criterion is verified. **In a PR fix round** (`pr_url` is set), `pass` goes straight to `advance <id> ship "PR fixes"` instead: the human approved shipping this PR, and its reviewers see the push.
+- `pass` → `advance <id> checkpoint-2`, or `advance <id> ship "ship approval skipped"` when `checkpoint-2` is skipped. The helper only accepts `pass` when the suite passed and every criterion is verified (a run that skipped the spec has no criteria, so only the suite counts). **In a PR fix round** (`pr_url` is set), `pass` goes straight to `advance <id> ship "PR fixes"` instead: the human approved shipping this PR, and its reviewers see the push.
 - `fail` with no failed criterion or suite, and at least one `unverifiable` criterion or suite → `advance <id> checkpoint-2 "unverifiable: AC…"`. At the checkpoint, name each unverifiable check and what the human would need to do themselves.
 - `fail` with attempts left (`loop.verify` < 3) → `advance <id> implement "verify failed"`. That pass goes through review again.
 - `fail` on the last attempt (`loop.verify` ≥ 3) → `advance <id> checkpoint-2 "verify did not pass"`.
@@ -200,7 +203,7 @@ Then get the answer. Outcomes:
 
 **The first ship** opens the PR:
 1. If `pr_url` is already set, reuse it. Otherwise, check for an existing PR with this exact head branch and base branch using the available GitHub tooling. A resumed `ship` stage may already have opened its PR before the session died. If an existing PR is found, record its URL and do not create another.
-2. If no PR exists, inspect the installed skills available in this session. If an applicable skill is specifically for creating or opening PRs, **use that skill by default**: read its instructions and follow its PR workflow. Give it the repository, exact head and base branches, run ID, spec summary, acceptance criteria, verification summary, and review notes the human accepted. The PR title comes from the spec summary; the body includes those items, plus the line `STATE approval <id>` prints when it says the spec was auto-approved, so reviewers know no human approved it. The human's **Ship** answer already authorizes the push and PR creation. Do not separately hand-roll `git push` or PR creation when the skill handles them. Do not let the PR skill merge or deploy; this factory stops at the PR. A skill for reviewing, monitoring, or merging PRs is not a PR creation skill.
+2. If no PR exists, inspect the installed skills available in this session. If an applicable skill is specifically for creating or opening PRs, **use that skill by default**: read its instructions and follow its PR workflow. Give it the repository, exact head and base branches, run ID, spec summary, acceptance criteria, verification summary, and review notes the human accepted. The PR title comes from the spec summary; the body includes those items, plus the line `STATE approval <id>` prints when it says the spec was auto-approved, so reviewers know no human approved it. The human's **Ship** answer, or `factory.skip` listing `checkpoint-2`, already authorizes the push and PR creation; in the second case the body also includes the `Ship:` line `STATE approval <id>` prints, and the summary of what was skipped, so reviewers know no human looked at the work before the PR. Do not separately hand-roll `git push` or PR creation when the skill handles them. Do not let the PR skill merge or deploy; this factory stops at the PR. A skill for reviewing, monitoring, or merging PRs is not a PR creation skill.
 3. If no applicable PR creation skill is installed, use the available GitHub tooling: `git push -u origin <branch>`, then open the PR against `base_branch` with the title and body above. Whether using a skill or generic tooling, preserve the exact head/base match, avoid a duplicate PR, and get the resulting URL.
 4. If pushing, checking for an existing PR, or opening a PR is unavailable or fails, `advance <id> blocked "shipping failed: <reason>"` and use Checkpoint 3. Leave the run branch in place. Do not advance to land.
 5. `set <id> pr_url <url>` once the PR URL is known.
@@ -281,7 +284,7 @@ If the last note starts with `steer requested`, the answer is the human's steer 
 
 ## Rules
 
-- **Never skip a human checkpoint.** Checkpoints 1 and 2 always stop for a human answer, however good the spec or verification looks. There are two exceptions: a PR fix round, which pushes to a PR the human already shipped, and a spec that `STATE policy` auto-approves because the repo opted in. Checkpoint 2 is never skipped.
+- **Never skip a human checkpoint the repo didn't skip.** Checkpoints 1 and 2 stop for a human answer, however good the spec or verification looks. The exceptions are a PR fix round, which pushes to a PR the human already shipped, a spec that `STATE policy` auto-approves, and the stages `STATE skips` lists. All three are the repo's explicit choice, and `state.py` enforces them; never skip anything else.
 - **Persist before you act.** Advance the state, then dispatch.
 - **Stay lean.** Keep file contents out of your own context unless a checkpoint needs them.
 - **Never force-push, rewrite history on `base_branch`, or merge.**

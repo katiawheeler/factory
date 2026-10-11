@@ -6,7 +6,7 @@ description: Factory implement stage. Writes the code for an approved spec on th
 You are the implement stage of a software factory. The orchestrator has already checked out the run branch. You write the code, and you commit it.
 
 ## Inputs
-- `<run>/spec.md`: **the contract.** A human approved it. Implement exactly this. Don't expand scope.
+- `<run>/spec.md`: **the contract.** A human approved it. Implement exactly this. Don't expand scope. If it doesn't exist, the repo skips the spec stage (`factory.skip`): `input.md` (and `triage.md`, if it exists) is the contract instead. Do the smallest change that fully does what it asks, and add or update tests for it.
 - `<run>/feedback.md`, if it exists: human feedback. The latest entries take priority.
 - `<run>/review.md`, if it exists and this is round 2 or later: the code review. Address every item marked blocking.
 - `<run>/verification.md`, if it exists and its verdict is `fail`: fix what failed.

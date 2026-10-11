@@ -40,6 +40,10 @@ Usage:
   state.py signals [<run-id>] [--days N] check merged runs for reverts, red CI on the merge commit,
                                          and the repo's own signal command; JSON
   state.py release <run-id>              remove a finished run's worktree (keeps the branch)
+  state.py skips                         the stages this repo skips (git config factory.skip), as JSON
+
+`advance` only takes the loop's own moves. `git config factory.skip <stages|all>` lets runs jump over
+triage, spec, checkpoint-1, review, verify and checkpoint-2; implement, ship and land are never skipped.
 
 Entering checkpoint-1, checkpoint-2, blocked, land, merged or closed runs the notify command,
 if one is set in $FACTORY_NOTIFY or `git config factory.notify`, with the event JSON on stdin.
@@ -69,6 +73,23 @@ TERMINAL = {"merged", "closed", "done", "aborted"}
 NOTIFY_STAGES = HUMAN_STAGES | {"land", "merged", "closed", "done"}
 SETTABLE = ("input_summary", "pr_url", "report_url", "thread_url")
 CAP_NOTES = ("review did not converge", "verify did not pass", "PR feedback did not converge")
+# The road from input to PR. factory.skip may jump over any of these but implement and ship.
+PATH = ["triage", "spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship"]
+SKIPPABLE = ("triage", "spec", "checkpoint-1", "review", "verify", "checkpoint-2")
+# Every other move a run may make, besides blocked and aborted from any stage. Loops go back to
+# implement (or to spec from a checkpoint); blocked hands the run to a human, who may send it anywhere.
+MOVES = {
+    "triage": {"spec", "checkpoint-1"},
+    "spec": {"checkpoint-1", "implement"},  # implement only when factory.autoApproveSpec allows it
+    "checkpoint-1": {"spec", "implement"},
+    "implement": {"review"},
+    "review": {"verify", "implement", "checkpoint-2"},
+    "verify": {"checkpoint-2", "implement", "ship"},  # ship only when fixing an open PR
+    "checkpoint-2": {"ship", "spec", "implement", "verify"},
+    "ship": {"land", "done"},
+    "land": {"merged", "closed", "implement", "checkpoint-2"},
+    "blocked": set(PATH) | {"land", "merged", "closed"},
+}
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # GitHub rejects comments over 65536 characters.
 REPORT_LIMIT = 60000
@@ -257,6 +278,54 @@ def cmd_get(run_id, field):
     print(json.dumps(val) if isinstance(val, (dict, list)) else val)
 
 
+def skip_setting():
+    """The stages the repo lets runs skip (git config factory.skip). Skipping spec skips its approval too."""
+    names = [w.lower() for w in words(setting("skip", "FACTORY_SKIP"))]
+    if "all" in names:
+        names = list(SKIPPABLE)
+    bad = [n for n in names if n not in SKIPPABLE]
+    if bad:
+        die(f"factory.skip can't skip {', '.join(bad)}; it takes any of: all, {', '.join(SKIPPABLE)}")
+    if "spec" in names:
+        names.append("checkpoint-1")
+    return set(names)
+
+
+def cmd_skips():
+    print(json.dumps([stage for stage in SKIPPABLE if stage in skip_setting()]))
+
+
+def skipped_between(s, stage):
+    """The stages a forward jump to `stage` leaves out, if factory.skip allows all of them; else None."""
+    here = s["stage"]
+    if here not in PATH or stage not in PATH or PATH.index(stage) <= PATH.index(here) + 1:
+        return None
+    between = PATH[PATH.index(here) + 1:PATH.index(stage)]
+    return between if set(between) <= skip_setting() else None
+
+
+def run_skips(s):
+    """Every stage this run skipped, in order."""
+    out = []
+    for e in s["history"]:
+        out += [x for x in e.get("skipped", []) if x not in out]
+    return out
+
+
+def unshippable(folder, s):
+    """Why work can't skip ship approval: the last check it went through didn't pass. Empty if it can ship."""
+    if s["stage"] == "verify":
+        try:
+            verdict = verification_results(folder, s)[0]
+        except Invalid as exc:
+            return f"the verification report is invalid ({exc})"
+        return "" if verdict == "pass" else "verification did not pass"
+    if s["stage"] == "review":
+        m = re.search(r"^Verdict: (\S+)$", read(folder, "review.md"), re.MULTILINE)
+        return "" if m and m.group(1) == "approve" else "review did not approve"
+    return ""
+
+
 def cmd_advance(run_id, stage, note=""):
     if stage not in STAGES:
         die(f"unknown stage '{stage}'; valid: {', '.join(STAGES)}")
@@ -265,17 +334,33 @@ def cmd_advance(run_id, stage, note=""):
         die(f"run is {s['stage']}; it cannot advance")
     if stage == s["stage"]:
         die(f"run is already at '{stage}'; dispatch it without advancing")
-    if stage == "done" and (s["stage"] != "ship" or not s.get("pr_url")):
+    jumped = skipped_between(s, stage)
+    if jumped is None and stage not in MOVES[s["stage"]] | {"blocked", "aborted"}:
+        allowed = ", ".join(sorted(MOVES[s["stage"]] | {"blocked", "aborted"}))
+        die(f"a run at '{s['stage']}' cannot move to '{stage}'; it can go to: {allowed}. "
+            "Skipping stages needs `git config factory.skip`")
+    if stage == "done" and not s.get("pr_url"):
         die("done requires the ship stage and a recorded PR URL")
     # A blocked run with an open PR goes back to following it without a fake ship.
-    if stage == "land" and (s["stage"] not in ("ship", "blocked") or not s.get("pr_url")):
+    if stage == "land" and not s.get("pr_url"):
         die("land requires the ship stage (or blocked, back to an open PR) and a recorded PR URL")
     if stage in ("merged", "closed") and not s.get("pr_url"):
         die(f"{stage} requires a recorded PR URL")
-    # Shipping needs the human's ship answer, except to push fixes to a PR they already approved.
-    if stage == "ship" and not (s["stage"] in ("checkpoint-2", "blocked") or (s["stage"] == "verify" and s.get("pr_url"))):
+    # Shipping needs the human's ship answer, except to push fixes to a PR they already approved,
+    # or when the repo skips ship approval and the work passed every check it didn't skip.
+    if stage == "ship" and s["stage"] == "verify" and not s.get("pr_url") and not jumped:
         die("ship comes after checkpoint-2, or after verify when pushing fixes to an open PR")
-    if s["stage"] == "spec" and stage == "implement":
+    if jumped and stage == "ship" and not s.get("pr_url"):
+        failing = unshippable(path.parent, s)
+        if failing:
+            die(f"ship approval is skipped, but this work can't ship without a human: {failing}")
+    # A skipped triage or spec is left without writing its output file.
+    left = s["stage"] in ("triage", "spec") and s["stage"] in skip_setting() \
+        and not (path.parent / f"{s['stage']}.md").exists()
+    skipped = ([s["stage"]] if left else []) + (jumped or [])
+    if skipped:
+        note = (note + "; " if note else "") + f"skipped {', '.join(skipped)} (factory.skip)"
+    if s["stage"] == "spec" and stage == "implement" and not jumped:
         # Skipping spec approval is the repo's explicit choice, checked here rather than trusted to the caller.
         decision = spec_policy(path.parent, s)
         if decision["reasons"]:
@@ -297,7 +382,10 @@ def cmd_advance(run_id, stage, note=""):
             loop[k] = 0
     if s["stage"] == "review" and stage == "verify":
         loop["review"] = 0  # review approved; its loop only counts consecutive change requests
-    s["history"].append({"at": now(), "from": s["stage"], "to": stage, "note": note})
+    entry = {"at": now(), "from": s["stage"], "to": stage, "note": note}
+    if skipped:
+        entry["skipped"] = skipped
+    s["history"].append(entry)
     s["stage"] = stage
     save(path, s)
     if stage in ROUND_CAP:
@@ -379,15 +467,19 @@ class Invalid(Exception):
     pass
 
 
-def verification_results(folder):
-    """Validate verification.md against spec.md; return (verdict, suite, {ACn: result})."""
+def verification_results(folder, s=None):
+    """Validate verification.md against spec.md; return (verdict, suite, {ACn: result}).
+
+    A run that skipped the spec has no criteria, so only the suite is checked.
+    """
+    no_spec = s is not None and "spec" in run_skips(s) and not (folder / "spec.md").exists()
     try:
-        spec = (folder / "spec.md").read_text()
+        spec = "" if no_spec else (folder / "spec.md").read_text()
         verification = (folder / "verification.md").read_text()
     except OSError as exc:
         raise Invalid(f"verification input missing or unreadable: {exc.filename}")
     expected = re.findall(r"^- \[[ xX]\] (AC\d+):", spec, re.MULTILINE)
-    if not expected or len(expected) != len(set(expected)):
+    if (not expected and not no_spec) or len(expected) != len(set(expected)):
         raise Invalid("spec must contain unique acceptance criteria named AC1, AC2, ...")
     verdicts = re.findall(r"^Verdict: (\S+)$", verification, re.MULTILINE)
     suites = re.findall(r"^Suite: (\S+)$", verification, re.MULTILINE)
@@ -413,9 +505,9 @@ def verification_results(folder):
 
 
 def cmd_check_verification(run_id):
-    path, _ = load(run_id)
+    path, s = load(run_id)
     try:
-        verdict, suite, found = verification_results(path.parent)
+        verdict, suite, found = verification_results(path.parent, s)
     except Invalid as exc:
         die(str(exc))
     print(json.dumps({"verdict": verdict, "suite": suite, "results": found}))
@@ -515,10 +607,14 @@ def spec_approval(s):
     The latest move into implement from spec or checkpoint-1 decides, so a spec the policy
     auto-approved and a human later revised and approved counts as human-approved.
     """
-    approvals = [e for e in s["history"] if e["to"] == "implement" and e["from"] in ("spec", "checkpoint-1")]
+    approvals = [e for e in s["history"] if e["to"] == "implement" and e["from"] in ("triage", "spec", "checkpoint-1")]
     if not approvals:
         return None
     last = approvals[-1]
+    if "spec" in last.get("skipped", []):
+        return "skipped by factory.skip; no spec was written and no human approved the work before implementation"
+    if "checkpoint-1" in last.get("skipped", []):
+        return "not approved: checkpoint 1 was skipped by factory.skip; no human reviewed it before implementation"
     if last["from"] == "spec":
         why = re.sub(r"^spec auto-approved by policy\s*", "", last["note"] or "")
         return f"auto-approved by policy {why}; no human reviewed it before implementation".replace("  ", " ")
@@ -529,6 +625,22 @@ def cmd_approval(run_id):
     _, s = load(run_id)
     approval = spec_approval(s)
     print(f"Spec: {approval}" if approval else "Spec: not approved yet")
+    if "checkpoint-2" in run_skips(s):
+        print(f"Ship: {SHIP_SKIPPED}")
+
+
+SHIP_SKIPPED = "no human approved shipping; checkpoint 2 was skipped by factory.skip"
+
+
+def skips_summary(s):
+    """The line telling reviewers which stages the run skipped, or nothing."""
+    skips = run_skips(s)
+    if not skips:
+        return []
+    line = f"**Skipped by `factory.skip`:** {', '.join(skips)}."
+    if "checkpoint-2" in skips:
+        line += f" {SHIP_SKIPPED[0].upper()}{SHIP_SKIPPED[1:]}."
+    return [line, ""]
 
 
 def results_summary(folder, s):
@@ -537,13 +649,18 @@ def results_summary(folder, s):
     icons = {"verified": "✅", "failed": "❌", "unverifiable": "⚠️"}
     out = []
     try:
-        verdict, suite, found = verification_results(folder)
-        out += [f"**Verification:** {verdict} · test suite {suite}", "",
-                "| Criterion | Result |", "|---|---|"]
-        for ac, result in found.items():
-            text = criteria.get(ac, "").replace("|", "\\|")
-            out.append(f"| **{ac}** {text} | {icons[result]} {result} |")
-        out.append("")
+        if "verify" in run_skips(s) and not (folder / "verification.md").exists():
+            out += ["**Verification:** skipped by `factory.skip`", ""]
+        else:
+            verdict, suite, found = verification_results(folder, s)
+            out += [f"**Verification:** {verdict} · test suite {suite}", ""]
+            if found:
+                out += ["| Criterion | Result |", "|---|---|"]
+            for ac, result in found.items():
+                text = criteria.get(ac, "").replace("|", "\\|")
+                out.append(f"| **{ac}** {text} | {icons[result]} {result} |")
+            if found:
+                out.append("")
     except Invalid as exc:
         out += [f"**Verification:** report did not validate ({exc})", ""]
     m = re.search(r"^Verdict: (\S+)$", read(folder, "review.md"), re.MULTILINE)
@@ -552,6 +669,7 @@ def results_summary(folder, s):
     approval = spec_approval(s)
     if approval and approval.startswith("auto"):
         out += [f"**Spec:** {approval}.", ""]
+    out += skips_summary(s)
     r = s["rounds"]
     rounds = f"**Rounds:** spec {r['spec']} · implement {r['implement']} · review {r['review']} · verify {r['verify']}"
     if r.get("land"):
@@ -1168,9 +1286,10 @@ def run_stats(s, until):
         "cap_hits": sum((e["note"] or "").startswith(CAP_NOTES) for e in h),
         "reached_spec_approval": any(e["from"] == "checkpoint-1" and e["to"] == "implement" for e in h),
         "reached_ship_approval": any(e["from"] == "checkpoint-2" and e["to"] == "ship" for e in h),
-        "auto_approved_spec": any(e["from"] == "spec" and e["to"] == "implement" for e in h),
-        "auto_spec_sent_back": any(e["from"] == "spec" and e["to"] == "implement" for e in h)
+        "auto_approved_spec": any(e["from"] == "spec" and e["to"] == "implement" and not e.get("skipped") for e in h),
+        "auto_spec_sent_back": any(e["from"] == "spec" and e["to"] == "implement" and not e.get("skipped") for e in h)
         and any(e["from"] == "checkpoint-2" and e["to"] == "spec" for e in h),
+        "skipped": run_skips(s),
         "regression": (s.get("signals") or {}).get("regression"),
         "parent_run": s.get("parent_run"),
         "learned": bool(s.get("learned_at")),
@@ -1238,6 +1357,8 @@ def cmd_stats(run_id=None, as_json=False):
         "runs_with_usage": len(priced),
         "auto_approved_specs": sum(r["auto_approved_spec"] for r in runs),
         "auto_specs_sent_back_to_spec": sum(r["auto_spec_sent_back"] for r in runs),
+        "runs_with_skips": sum(bool(r["skipped"]) for r in runs),
+        "shipped_without_ship_approval": sum("checkpoint-2" in r["skipped"] for r in runs),
         "merged_runs_checked_for_signals": sum(r["regression"] is not None for r in runs),
         "regressions": sum(bool(r["regression"]) for r in runs),
         "follow_up_runs": sum(bool(r["parent_run"]) for r in runs),
@@ -1262,6 +1383,9 @@ def cmd_stats(run_id=None, as_json=False):
     if summary["auto_approved_specs"]:
         print(f"specs auto-approved by policy: {summary['auto_approved_specs']}, "
               f"{summary['auto_specs_sent_back_to_spec']} later sent back to spec at ship approval")
+    if summary["runs_with_skips"]:
+        print(f"runs that skipped stages (factory.skip): {summary['runs_with_skips']}, "
+              f"{summary['shipped_without_ship_approval']} shipped without ship approval")
     if summary["merged_runs_checked_for_signals"]:
         print(f"regressions after merge: {summary['regressions']} of {summary['merged_runs_checked_for_signals']} "
               f"merged runs checked · follow-up runs: {summary['follow_up_runs']}")
@@ -1296,6 +1420,7 @@ COMMANDS = {
     "release": (cmd_release, 1), "pr-status": (cmd_pr_status, 1), "inbox": (cmd_inbox, 1),
     "checkpoint-post": (cmd_checkpoint_post, 1), "pr-update": (cmd_pr_update, 1), "usage": (cmd_usage, 3), "stats": (cmd_stats, 0),
     "policy": (cmd_policy, 1), "learn": (cmd_learn, 1), "signals": (cmd_signals, 0), "seen": (cmd_seen, 1), "approval": (cmd_approval, 1),
+    "skips": (cmd_skips, 0),
 }
 
 

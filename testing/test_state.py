@@ -128,6 +128,88 @@ class StateTest(unittest.TestCase):
         self.advance("aborted")
         self.run_state("advance", self.id, "spec", ok=False)
 
+    def test_advance_follows_the_loop_unless_the_repo_skips_stages(self):
+        err = self.run_state("advance", self.id, "implement", ok=False).stderr
+        self.assertIn("cannot move to 'implement'", err)
+        self.assertIn("factory.skip", err)
+        self.advance("spec", "checkpoint-1", "implement")
+        for stage in ("verify", "checkpoint-2", "ship", "land"):
+            self.run_state("advance", self.id, stage, ok=False)
+        self.advance("blocked", "verify")  # a human steer may send the run anywhere
+
+    def test_skip_takes_only_skippable_stages(self):
+        for value in ("implement", "ship", "land", "reviews"):
+            self.git("config", "factory.skip", value)
+            self.assertIn("can't skip", self.run_state("advance", self.id, "spec", ok=False).stderr)
+        self.git("config", "factory.skip", "all")
+        self.assertIn("cannot move", self.run_state("advance", self.id, "review", ok=False).stderr)
+        self.assertEqual(json.loads(self.run_state("skips").stdout), list(
+            ("triage", "spec", "checkpoint-1", "review", "verify", "checkpoint-2")))
+        self.assertEqual(json.loads(self.run_state("skips", env={"FACTORY_SKIP": "spec"}).stdout),
+                         ["spec", "checkpoint-1"])
+
+    def test_skip_review_and_verify(self):
+        self.git("config", "factory.skip", "review, verify")
+        self.advance("spec", "checkpoint-1", "implement", "checkpoint-2")
+        self.assertEqual(self.state()["history"][-1]["skipped"], ["review", "verify"])
+        self.advance("ship")
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        self.run_state("pr-report", self.id)
+        report = (self.repo / ".factory/runs" / self.id / "pr-report.md").read_text()
+        self.assertIn("**Skipped by `factory.skip`:** review, verify.", report)
+        self.assertIn("**Verification:** skipped by `factory.skip`", report)
+        self.assertNotIn("No human approved shipping", report)
+
+    def test_skip_everything_goes_from_input_to_pr(self):
+        self.git("config", "factory.skip", "all")
+        self.advance("implement")
+        self.assertEqual(self.state()["history"][-1]["skipped"], ["triage", "spec", "checkpoint-1"])
+        self.advance("ship")
+        self.assertEqual(self.state()["history"][-1]["skipped"], ["review", "verify", "checkpoint-2"])
+        self.assertEqual(self.run_state("approval", self.id).stdout.strip().splitlines(), [
+            "Spec: skipped by factory.skip; no spec was written and no human approved the work before implementation",
+            "Ship: no human approved shipping; checkpoint 2 was skipped by factory.skip"])
+        self.assertIn("recorded PR URL", self.run_state("advance", self.id, "land", ok=False).stderr)
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        self.advance("land", "implement", "ship", "land", "merged")
+        stats = json.loads(self.run_state("stats", "--json").stdout)["summary"]
+        self.assertEqual((stats["runs_with_skips"], stats["shipped_without_ship_approval"]), (1, 1))
+        self.assertEqual(stats["auto_approved_specs"], 0)
+
+    def test_skipping_ship_approval_needs_the_checks_that_ran_to_pass(self):
+        self.git("config", "factory.skip", "checkpoint-2")
+        folder = self.repo / ".factory/runs" / self.id
+        self.advance("spec", "checkpoint-1", "implement", "review", "verify")
+        (folder / "spec.md").write_text("## Acceptance criteria\n- [ ] AC1: first\n")
+        verification = folder / "verification.md"
+        verification.write_text("Verdict: fail\nSuite: fail\n### AC1: first\nResult: failed\n")
+        self.assertIn("verification did not pass", self.run_state("advance", self.id, "ship", ok=False).stderr)
+        verification.write_text("Verdict: pass\nSuite: pass\n### AC1: first\nResult: verified\n")
+        self.advance("ship")
+        self.assertEqual(self.state()["history"][-1]["skipped"], ["checkpoint-2"])
+        # With verify skipped too, review's verdict is the last check, and it must approve.
+        self.git("config", "factory.skip", "verify,checkpoint-2")
+        self.id = self.run_state("new", "b", "-", input="x").stdout.split()[0]
+        folder = self.repo / ".factory/runs" / self.id
+        self.advance("spec", "checkpoint-1", "implement", "review")
+        (folder / "review.md").write_text("Verdict: changes-requested\n")
+        self.assertIn("review did not approve", self.run_state("advance", self.id, "ship", ok=False).stderr)
+        (folder / "review.md").write_text("Verdict: approve\n")
+        self.advance("ship")
+
+    def test_skipped_triage_is_recorded_and_a_spec_less_run_verifies_the_suite(self):
+        self.git("config", "factory.skip", "triage,spec")
+        folder = self.repo / ".factory/runs" / self.id
+        self.advance("spec")
+        self.assertEqual(self.state()["history"][-1]["skipped"], ["triage"])
+        self.advance("implement")  # spec skipped, so its approval is too
+        self.assertEqual(self.state()["history"][-1]["skipped"], ["spec", "checkpoint-1"])
+        self.advance("review", "verify")
+        (folder / "verification.md").write_text("Verdict: pass\nSuite: pass\n")
+        self.assertEqual(json.loads(self.run_state("check-verification", self.id).stdout)["results"], {})
+        (folder / "verification.md").write_text("Verdict: pass\nSuite: fail\n")
+        self.run_state("check-verification", self.id, ok=False)
+
     def test_done_requires_pr_url(self):
         self.advance("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship")
         self.assertIn("recorded PR URL", self.run_state("advance", self.id, "done", ok=False).stderr)
@@ -148,7 +230,7 @@ class StateTest(unittest.TestCase):
     def test_land_requires_ship_and_pr_url(self):
         self.advance("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship")
         self.assertIn("recorded PR URL", self.run_state("advance", self.id, "land", ok=False).stderr)
-        self.assertIn("recorded PR URL", self.run_state("advance", self.id, "merged", ok=False).stderr)
+        self.assertIn("cannot move to 'merged'", self.run_state("advance", self.id, "merged", ok=False).stderr)
         self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
         self.advance("land")
         self.assertIn("PR open for review", self.run_state("list").stdout)
@@ -179,7 +261,7 @@ class StateTest(unittest.TestCase):
         other = self.run_state("new", "b", "-", input="x").stdout.split()[0]
         self.id = other
         self.ship()
-        self.advance("implement", "closed")
+        self.advance("closed")
         self.assertEqual(self.state()["stage"], "closed")
 
     def test_notify_on_land_and_merge(self):
@@ -540,10 +622,11 @@ else:
         self.assertIn("LAST ATTEMPT", out[2])
 
     def test_human_stages_reset_attempts(self):
-        for human in ("checkpoint-2", "blocked", "checkpoint-1"):
+        self.advance("spec", "checkpoint-1")
+        for human in ("checkpoint-2", "blocked"):
             self.advance("implement", "review", "verify", human)
             self.assertEqual(self.state()["loop"], {"land": 0, "review": 0, "verify": 0}, human)
-        self.assertEqual(self.state()["rounds"]["review"], 3)
+        self.assertEqual(self.state()["rounds"]["review"], 2)
 
     def test_feedback_appends_under_heading(self):
         self.run_state("feedback", self.id, "Checkpoint 1: round 1", input="make it blue\n")

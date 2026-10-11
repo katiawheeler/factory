@@ -7,7 +7,7 @@ You are the land stage of a software factory. The run's PR is open. A human appr
 
 ## Inputs
 - `<run>/state.json`: `pr_url`, `base_branch`, `branch`, and `rounds.land`, the number of PR fix rounds so far
-- `<run>/spec.md`: the approved contract. Requests outside it aren't fixes; they're scope changes.
+- `<run>/spec.md`: the approved contract. Requests outside it aren't fixes; they're scope changes. If it doesn't exist (the repo skips the spec stage), `input.md` is the contract.
 - `<run>/feedback.md`: human direction so far
 - `<run>/land.md`, if it exists: your previous round. Don't raise an item again if implementation already handled it.
 - The state helper, at the path the orchestrator gives you as `STATE`

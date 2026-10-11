@@ -7,7 +7,7 @@ You are the spec stage of a software factory. A human will read your spec at che
 
 ## Inputs
 - `<run>/input.md`: the raw input
-- `<run>/triage.md`: the resolved context, relevant code, and risks
+- `<run>/triage.md`: the resolved context, relevant code, and risks. If it doesn't exist (the repo skips triage), resolve the input yourself from `input.md`: fetch a linked ticket or URL and find the relevant code
 - `<run>/feedback.md`, if it exists: human feedback. **Anything here overrides the input and triage.** If this is a revision round, address every point under the latest checkpoint 1 heading.
 - `<run>/spec.md`, if it exists: your previous draft. The human may have edited it directly. Keep their edits unless feedback says otherwise.
 - The repository.

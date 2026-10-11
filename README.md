@@ -1,6 +1,6 @@
 # factory
 
-A software factory workflow for any coding agent that can read the skill and run Git and Python commands. Give it a ticket, URL, or prompt; it triages the request, writes a spec, implements it on a branch, reviews the diff, verifies the acceptance criteria, opens a PR after human approval, and then carries that PR through CI failures and review comments until it merges or closes. Each finished run ends with a retro that teaches the next run, and merged runs can be checked for reverts and failures. It never merges or deploys; merging stays a human's call. Inspired by Warp's [guide to cloud software factories](https://www.warp.dev/blog/a-guide-to-cloud-software-factories-for-engineering-leaders).
+A software factory workflow for any coding agent that can read the skill and run Git and Python commands. Give it a ticket, URL, or prompt; it triages the request, writes a spec, implements it on a branch, reviews the diff, verifies the acceptance criteria, opens a PR after human approval (or without it, if the repo opts in to full automation), and then carries that PR through CI failures and review comments until it merges or closes. Each finished run ends with a retro that teaches the next run, and merged runs can be checked for reverts and failures. It never merges or deploys; merging stays a human's call. Inspired by Warp's [guide to cloud software factories](https://www.warp.dev/blog/a-guide-to-cloud-software-factories-for-engineering-leaders).
 
 ```text
 <factory> <ticket | URL | prompt>
@@ -132,7 +132,21 @@ git config factory.autoApproveSpec S
 git config factory.autoApproveTypes bug,chore
 ```
 
-A spec is auto-approved only on its first round, when triage said `proceed`, and when the spec has acceptance criteria and no open questions. An open question blocks auto-approval even when the spec proposes a default: someone should see the default before work starts. Auto-approval never acts as you on GitHub: nothing is posted or approved in your name. The run's history records it, and the ship checkpoint, the PR description, and the PR report say the spec was auto-approved and that no human reviewed it, so reviewers don't assume you did. `state.py` checks this itself when the run moves from spec to implement, so the orchestrator can't skip the checkpoint otherwise. Ship approval is never skipped. `state.py stats` reports how many specs were auto-approved and how many were later sent back to spec at ship approval, which tells you whether the policy is too loose.
+A spec is auto-approved only on its first round, when triage said `proceed`, and when the spec has acceptance criteria and no open questions. An open question blocks auto-approval even when the spec proposes a default: someone should see the default before work starts. Auto-approval never acts as you on GitHub: nothing is posted or approved in your name. The run's history records it, and the ship checkpoint, the PR description, and the PR report say the spec was auto-approved and that no human reviewed it, so reviewers don't assume you did. `state.py` checks this itself when the run moves from spec to implement, so the orchestrator can't skip the checkpoint otherwise. Ship approval is skipped only by `factory.skip`, below. `state.py stats` reports how many specs were auto-approved and how many were later sent back to spec at ship approval, which tells you whether the policy is too loose.
+
+### Skipping stages for automation
+
+By default every run takes the whole loop, and `state.py` refuses any other move: a run can't jump from triage to implement, or from implement to ship. To automate the factory, list the stages your repo is willing to skip:
+
+```sh
+git config factory.skip review,verify      # skip review and verification
+git config factory.skip checkpoint-1,checkpoint-2   # no human approvals: input to PR unattended
+git config factory.skip all                # triage, spec, checkpoint-1, review, verify, checkpoint-2
+```
+
+`FACTORY_SKIP` overrides it for one session, for example in a CI job. Implement, ship, and land are never skipped: every run still ends in a PR, and the factory still never merges it. Skipping the spec skips its approval too, and implement, review, and verify then work from the input itself. A run that skips verify only gets to ship when review approved, and one that skips checkpoint 2 only when its verification passed. Escalations still stop for a human, even at a checkpoint you skip: triage questions or a rejection, a loop cap, an unverifiable criterion, and a blocked stage.
+
+Each skip is recorded in the run's history. The PR report and PR updates list the stages skipped, say when no human approved the spec or the ship decision, and say when verification was skipped. `state.py stats` counts runs that skipped stages and runs that shipped without ship approval.
 
 ### Notifications
 
