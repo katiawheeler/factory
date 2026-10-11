@@ -284,6 +284,9 @@ def cmd_advance(run_id, stage, note=""):
         print(stage)
     if stage in NOTIFY_STAGES:
         notify(path.parent, s)
+    if stage in HUMAN_STAGES and (s.get("pr_url") or (s.get("thread_url") and posting_enabled())):
+        print(f"post this checkpoint on GitHub: python3 {Path(__file__).resolve()} checkpoint-post {s['id']}, "
+              "then run the command it prints")
 
 
 def notify(folder, s):

@@ -292,12 +292,15 @@ else:
     def test_checkpoint_post_puts_the_spec_on_the_issue_when_enabled(self):
         folder = self.repo / ".factory/runs" / self.id
         self.assertIn("not a checkpoint", self.run_state("checkpoint-post", self.id, ok=False).stderr)
-        self.advance("spec", "checkpoint-1")
+        out = self.advance("spec", "checkpoint-1")
+        self.assertNotIn("post this checkpoint", out[1])
         self.assertIn("no thread_url", self.run_state("checkpoint-post", self.id, ok=False).stderr)
         self.run_state("set", self.id, "thread_url", "https://github.com/o/r/issues/3")
         self.assertIn("postCheckpoints", self.run_state("checkpoint-post", self.id, ok=False).stderr)
         (folder / "spec.md").write_text("# Spec: blue\n\n## Acceptance criteria\n- [ ] AC1: it is blue\n")
         self.git("config", "factory.postCheckpoints", "true")
+        self.run_state("advance", self.id, "spec", "revise")
+        self.assertIn(f"checkpoint-post {self.id}", self.run_state("advance", self.id, "checkpoint-1").stdout)
         out = self.run_state("checkpoint-post", self.id).stdout.splitlines()
         self.assertEqual(out[1], f"gh issue comment https://github.com/o/r/issues/3 --body-file {folder / 'checkpoint-post.md'}")
         post = (folder / "checkpoint-post.md").read_text()
