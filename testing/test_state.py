@@ -411,6 +411,24 @@ else:
         self.assertEqual(self.state()["history"][-1]["note"], "spec auto-approved by policy (size S, type bug)")
         stats = json.loads(self.run_state("stats", "--json").stdout)["summary"]
         self.assertEqual(stats["auto_approved_specs"], 1)
+        self.assertEqual(self.run_state("approval", self.id).stdout.strip(),
+                         "Spec: auto-approved by policy (size S, type bug); no human reviewed it before implementation")
+        self.advance("review", "verify", "checkpoint-2", "ship")
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        self.run_state("pr-report", self.id)
+        report = (self.repo / ".factory/runs" / self.id / "pr-report.md").read_text()
+        self.assertIn("**Spec:** auto-approved by policy (size S, type bug); no human reviewed it before implementation.",
+                      report)
+        # A human later sends it back to spec and approves the revision: the report stops saying auto.
+        self.advance("land", "blocked", "spec", "checkpoint-1", "implement")
+        self.assertEqual(self.run_state("approval", self.id).stdout.strip(), "Spec: approved by a human at checkpoint 1")
+        self.run_state("pr-report", self.id)
+        self.assertNotIn("**Spec:**", (self.repo / ".factory/runs" / self.id / "pr-report.md").read_text())
+
+    def test_approval_before_and_after_a_human_approves(self):
+        self.assertEqual(self.run_state("approval", self.id).stdout.strip(), "Spec: not approved yet")
+        self.advance("spec", "checkpoint-1", "implement")
+        self.assertEqual(self.run_state("approval", self.id).stdout.strip(), "Spec: approved by a human at checkpoint 1")
 
     def test_policy_reasons(self):
         self.policy_run(size="M", kind="feature", questions="- Q: which? **Default if unanswered:** a",

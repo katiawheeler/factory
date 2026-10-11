@@ -35,6 +35,7 @@ Usage:
                                          record what a stage dispatch cost
   state.py stats [<run-id>] [--json]     time, rounds, outcomes and cost, for one run or all runs
   state.py policy <run-id>               whether the repo's policy auto-approves this spec (JSON)
+  state.py approval <run-id>             one line saying who approved the spec: a human or the policy
   state.py learn <run-id>                merge retro.md's learnings into .factory/learnings.md
   state.py signals [<run-id>] [--days N] check merged runs for reverts, red CI on the merge commit,
                                          and the repo's own signal command; JSON
@@ -508,6 +509,28 @@ def spec_criteria(spec):
     return dict(re.findall(r"^- \[[ xX]\] (AC\d+): *(.*?)(?: *\*\*Verify by:\*\*.*)?$", spec, re.MULTILINE))
 
 
+def spec_approval(s):
+    """Who approved the spec the code was built from: the policy, a human, or nobody yet.
+
+    The latest move into implement from spec or checkpoint-1 decides, so a spec the policy
+    auto-approved and a human later revised and approved counts as human-approved.
+    """
+    approvals = [e for e in s["history"] if e["to"] == "implement" and e["from"] in ("spec", "checkpoint-1")]
+    if not approvals:
+        return None
+    last = approvals[-1]
+    if last["from"] == "spec":
+        why = re.sub(r"^spec auto-approved by policy\s*", "", last["note"] or "")
+        return f"auto-approved by policy {why}; no human reviewed it before implementation".replace("  ", " ")
+    return "approved by a human at checkpoint 1"
+
+
+def cmd_approval(run_id):
+    _, s = load(run_id)
+    approval = spec_approval(s)
+    print(f"Spec: {approval}" if approval else "Spec: not approved yet")
+
+
 def results_summary(folder, s):
     """The verification table, review verdict and rounds, as markdown lines."""
     criteria = spec_criteria(read(folder, "spec.md"))
@@ -526,6 +549,9 @@ def results_summary(folder, s):
     m = re.search(r"^Verdict: (\S+)$", read(folder, "review.md"), re.MULTILINE)
     if m:
         out += [f"**Review:** {m.group(1)}", ""]
+    approval = spec_approval(s)
+    if approval and approval.startswith("auto"):
+        out += [f"**Spec:** {approval}.", ""]
     r = s["rounds"]
     rounds = f"**Rounds:** spec {r['spec']} · implement {r['implement']} · review {r['review']} · verify {r['verify']}"
     if r.get("land"):
@@ -1269,7 +1295,7 @@ COMMANDS = {
     "check-verification": (cmd_check_verification, 1), "pr-report": (cmd_pr_report, 1),
     "release": (cmd_release, 1), "pr-status": (cmd_pr_status, 1), "inbox": (cmd_inbox, 1),
     "checkpoint-post": (cmd_checkpoint_post, 1), "pr-update": (cmd_pr_update, 1), "usage": (cmd_usage, 3), "stats": (cmd_stats, 0),
-    "policy": (cmd_policy, 1), "learn": (cmd_learn, 1), "signals": (cmd_signals, 0), "seen": (cmd_seen, 1),
+    "policy": (cmd_policy, 1), "learn": (cmd_learn, 1), "signals": (cmd_signals, 0), "seen": (cmd_seen, 1), "approval": (cmd_approval, 1),
 }
 
 
