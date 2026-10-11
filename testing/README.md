@@ -173,20 +173,43 @@ Use a sample repo with CI on pull requests, and a second GitHub account (or a te
 | Parallel runs, one `git worktree` each | real agents, 5 worktrees | ✅ |
 | Headless `claude -p "/factory <id> ship"` pushes the run branch, opens a real PR with `gh`, records `pr_url` and stage `done` in `state.json`, and switches the session back to `main` | real agents, `katiawheeler/vibe#10` | ✅ |
 | Picking Steer from the AskUserQuestion menu at ①: the steer is logged under `Steer: checkpoint-1`, spec round 2 applies it and returns to ①, then approve → implement | real agents, interactive `claude`, `katiawheeler/vibe` | ✅ |
-| Worktree per run: dirty checkout untouched, dependencies installed, parallel runs, release on ship, abort with leftovers, `--in-place`, older runs, stubs (worktree flows 1–8) | not yet run | ⏳ |
+| Worktree per run: dependencies installed per worktree, parallel runs (5 at once), release on merged/closed/aborted, stubs in a separate clone (worktree flows 2–4, 8) | real agents, `katiawheeler/vibe` | ✅ |
+| Worktree per run: dirty checkout untouched, abort with leftovers, `--in-place`, older runs (worktree flows 1, 5–7) | not yet run | ⏳ |
 | PR report: inline screenshots and recordings, no duplicate on resume, older `gh`, failed upload, no `gh`, oversized files (PR report flows 1–7) | not yet run | ⏳ |
-| Notifications: each human stop, blocked, a real channel, environment override, failing command, waiting time (notification flows 1–6) | not yet run | ⏳ |
+| Notifications: every human stop, blocked, land (PR opened, fixes pushed) and merged notify once (26 events over 7 runs) | real agents, `katiawheeler/vibe` | ✅ |
+| Notifications: a real channel, environment override, failing command, waiting time (notification flows 3–6) | not yet run | ⏳ |
 | Standalone Playwright recipe: screenshots via `EVIDENCE`, video per test, trace on failure, `PW_CHROMIUM` for a mismatched browser | by hand, static page, `@playwright/test` 1.63 | ✅ |
 | Playwright in verify with real agents: standalone and repo-configured, failing flow, faked states, second round, browser mismatch, no browser (Playwright flows 1–7) | not yet run | ⏳ |
-| Land: wait, merge, red CI, review comment, untrusted and bot comments, conflict, design question, cap, closed (land flows 1–8) | not yet run | ⏳ |
-| Answering from GitHub: issue approval, opt-in, ship on the PR, untrusted answer, allowlist (flows 1–5) | not yet run | ⏳ |
-| Run ledger: usage recorded, stats across runs (flows 1–2) | not yet run | ⏳ |
-| Retro and learnings (flows 1–5), signals and follow-ups (flows 1–4), auto-approval (flows 1–2) | not yet run | ⏳ |
+| Land: wait → merged (vibe#22); review comment that changes an AC → needs-human, answered on the PR → fix round (vibe#21); red CI caused by the PR → diagnosed → fix round → green; CI red for reasons outside the PR (npm E401) → needs-human with evidence (vibe#20, #23); bot comments (Vercel, CodeRabbit) not acted on; design question → not a fix; cap: 3 fix rounds → ② (stubs, vibe#19) | real agents, `katiawheeler/vibe` | ✅ |
+| Land: merge conflict fix round; closed without merge (land flows 5, 8) | not yet run: a conflict needs a commit to the base branch | ⏳ |
+| Answering from GitHub: `/factory approve` and `/factory ship` on the source issue, checkpoints posted on the issue (opt-in), a blocked question answered on the PR, untrusted answer and allowlist (`factory.approvers`) | real agents, `katiawheeler/vibe#18`, `#21`, `#23` | ✅ |
+| Run ledger: usage recorded by the orchestrator, `stats` across 7 runs | real agents, `katiawheeler/vibe` | ✅ |
+| Retro and learnings: lessons from a spec revision, red CI and a needs-human stop; a later run cites a lesson (E401 is not the PR's fault); proposed repo changes offered, not started; retro on abort | real agents, `katiawheeler/vibe` | ✅ |
+| Signals: merge-commit CI read as pass/none, custom signal command → regression → follow-up run with `parent_run`, whose triage asked for evidence instead of guessing | real agents, `katiawheeler/vibe` | ✅ |
+| Signals: a real revert on the base branch (signals flow 1) | not yet run: needs a revert commit on the base branch | ⏳ |
+| Auto-approval: specs with open questions stop at ① (2 runs); an unambiguous chore is auto-approved, then ships and merges (vibe#24) | real agents, `katiawheeler/vibe` | ✅ |
 
 Codex GUI question routing and selection of a dedicated PR creation skill are documented behavior; they have not yet been exercised in an end-to-end factory run.
+
+## Findings from the first real runs
+
+Running the land, GitHub-answer, retro, signals and auto-approval flows on `katiawheeler/vibe` turned up these problems, each fixed on `main`:
+
+1. A headless orchestrator skipped posting a checkpoint on the issue. `advance` now prints the `checkpoint-post` command whenever a stop should be posted.
+2. `/factory approve` with a signature under it read as feedback. A keyword alone on the first line is now the whole answer.
+3. `gh pr create` and `gh pr comment` need GraphQL, which some hosts block. The comment commands now print a REST `fallback:` line.
+4. A resume without arguments didn't check GitHub for an answer. `show` now prints a note saying to run `inbox`.
+5. Retro token usage was rejected by `usage`.
+6. A blocked run with an open PR had to fake a `ship` to get back to `land`.
+7. A retro that copied the `_(run-id)_` suffix got it twice.
+8. A land `wait` didn't mark comments read, so an old `/factory abort` resurfaced. `seen` now moves the cursor.
+9. Runs branched from a stale local base and missed a test already on `origin/main`. `new` now refuses a base that is behind its upstream.
+
+One observation, not changed: the spec stage nearly always lists open questions with defaults, so auto-approval, which requires none, rarely fires. Loosening it (for example, allowing open questions that have defaults) is a policy decision.
 
 ## Known limitations
 
 - **In-place runs share the checkout.** A run created with `--in-place` switches the checkout to its branch, so only one can be active there at a time. Default runs each get a worktree and don't have this limit.
-- **Untested end to end:** worktree-per-run, posting the PR report, Playwright in verify, notifications, landing, answering from GitHub, and the ledger are covered by the unit tests above, but have not yet been exercised in a full factory run with real agents. See [End-to-end flows for worktrees, the PR report, Playwright, and notifications](#end-to-end-flows-for-worktrees-the-pr-report-playwright-and-notifications).
+- **Single GitHub account:** in a single-owner repo the factory's PRs are opened as the reviewer too, so GitHub won't accept "Request changes" on them; review comments still work. A real outsider (no write access) was simulated with `factory.approvers`.
+- **Untested end to end:** the flows still marked ⏳ above are covered by the unit tests above, but have not yet been exercised in a full factory run with real agents. See [End-to-end flows for worktrees, the PR report, Playwright, and notifications](#end-to-end-flows-for-worktrees-the-pr-report-playwright-and-notifications).
 - **Long headless runs** can outlive a wrapping tool's timeout. Run them in the background and wait on the PID.
