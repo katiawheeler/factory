@@ -836,7 +836,7 @@ def cmd_pr_update(run_id):
 
 def cmd_usage(run_id, stage, tokens, usd=None):
     path, s = load(run_id)
-    if stage not in STAGES:
+    if stage not in STAGES and stage != "retro":
         die(f"unknown stage '{stage}'")
     try:
         tokens = int(tokens)

@@ -342,8 +342,10 @@ else:
 
     def test_usage_and_stats(self):
         self.run_state("usage", self.id, "triage", "1200", "0.05")
-        self.run_state("usage", self.id, "spec", "800")
+        self.run_state("usage", self.id, "spec", "700")
+        self.run_state("usage", self.id, "retro", "100")
         self.run_state("usage", self.id, "spec", "x", ok=False)
+        self.run_state("usage", self.id, "nope", "1", ok=False)
         self.advance("spec", "checkpoint-1")
         self.run_state("advance", self.id, "spec", "revise")
         self.advance("checkpoint-1", "implement", "review", "verify", "checkpoint-2", "implement", "review",
