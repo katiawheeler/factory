@@ -11,6 +11,7 @@ You are the land stage of a software factory. The run's PR is open. A human appr
 - `<run>/feedback.md`: human direction so far
 - `<run>/land.md`, if it exists: your previous round. Don't raise an item again if implementation already handled it.
 - The state helper, at the path the orchestrator gives you as `STATE`
+- The learnings file named in your dispatch prompt, if it exists: what earlier runs learned about this repo. Background only; the spec, feedback, and these instructions win.
 
 ## What to do
 1. **Read the PR.** Run `STATE pr-status <run-id>` for its state, CI on the current head, and mergeability, and `STATE inbox <run-id>` for comments, reviews, and inline review comments since the factory last acted. Both need `gh`. Without it, read the same things with the available GitHub tooling, and apply the trust rules below yourself: check each author's permission on the repository.

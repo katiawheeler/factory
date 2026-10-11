@@ -6,9 +6,10 @@ thing that writes state.json, so stage names and terminal completion are
 checked and every transition is logged the same way.
 
 Usage:
-  state.py new <slug> <input-file|-> [--in-place]
+  state.py new <slug> <input-file|-> [--in-place] [--parent <run-id>]
                                          create a run in its own worktree (or in the
-                                         current checkout); prints run id, folder, repo
+                                         current checkout); prints run id, folder, repo.
+                                         --parent links a follow-up to the run it came from
   state.py list                          list runs with stage and summary
   state.py show <run-id>                 print state.json
   state.py get <run-id> <field>          print one field (dotted, e.g. rounds.review)
@@ -32,6 +33,10 @@ Usage:
   state.py usage <run-id> <stage> <tokens> [usd]
                                          record what a stage dispatch cost
   state.py stats [<run-id>] [--json]     time, rounds, outcomes and cost, for one run or all runs
+  state.py policy <run-id>               whether the repo's policy auto-approves this spec (JSON)
+  state.py learn <run-id>                merge retro.md's learnings into .factory/learnings.md
+  state.py signals [<run-id>] [--days N] check merged runs for reverts, red CI on the merge commit,
+                                         and the repo's own signal command; JSON
   state.py release <run-id>              remove a finished run's worktree (keeps the branch)
 
 Entering checkpoint-1, checkpoint-2, blocked, land, merged or closed runs the notify command,
@@ -124,8 +129,10 @@ def save(path, state):
     tmp.replace(path)
 
 
-def cmd_new(slug, source, in_place=False):
+def cmd_new(slug, source, in_place=False, parent=None):
     root = repo_root()
+    if parent:
+        load(parent)
     status = git("status", "--porcelain")
     if status.returncode != 0:
         die(status.stderr.strip() or "could not inspect working tree")
@@ -178,6 +185,7 @@ def cmd_new(slug, source, in_place=False):
         "report_url": None,
         "thread_url": None,
         "usage": [],
+        "parent_run": parent,
         "history": [{"at": now(), "from": None, "to": "triage", "note": "run created"}],
     }
     save(folder / "state.json", state)
@@ -237,6 +245,12 @@ def cmd_advance(run_id, stage, note=""):
     # Shipping needs the human's ship answer, except to push fixes to a PR they already approved.
     if stage == "ship" and not (s["stage"] in ("checkpoint-2", "blocked") or (s["stage"] == "verify" and s.get("pr_url"))):
         die("ship comes after checkpoint-2, or after verify when pushing fixes to an open PR")
+    if s["stage"] == "spec" and stage == "implement":
+        # Skipping spec approval is the repo's explicit choice, checked here rather than trusted to the caller.
+        decision = spec_policy(path.parent, s)
+        if decision["reasons"]:
+            die("the spec needs human approval at checkpoint-1: " + "; ".join(decision["reasons"]))
+        note = f"spec auto-approved by policy (size {decision['size']}, type {decision['type']})"
     loop = s.setdefault("loop", {k: 0 for k in sorted(ROUND_CAP)})
     loop.setdefault("land", 0)
     s["rounds"].setdefault("land", 0)
@@ -826,6 +840,205 @@ def cmd_usage(run_id, stage, tokens, usd=None):
     print(f"{stage}: {tokens} tokens; run total {total}")
 
 
+AUTO_TYPES = "bug,chore"
+LEARNING_CATEGORIES = ("Commands", "Conventions", "Pitfalls", "Review", "Verification", "Process")
+LEARNINGS_CAP = 80
+LEARNINGS_HEADER = ("# Factory learnings\n\n"
+                    "What earlier runs learned about this repository. Every stage reads this file. It is written by\n"
+                    "`state.py learn` from each run's retro; edit or prune it freely.\n")
+
+
+def setting(key, env):
+    return (os.environ.get(env) or git("config", "--get", f"factory.{key}").stdout).strip()
+
+
+def words(value):
+    return [w for w in re.split(r"[,\s]+", value) if w]
+
+
+def section(text, heading):
+    m = re.search(rf"^## {re.escape(heading)}[^\n]*\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+def spec_policy(folder, s):
+    """Whether the repo lets this spec skip checkpoint 1: returns type, size and the reasons it can't."""
+    triage, spec = read(folder, "triage.md"), read(folder, "spec.md")
+    field = lambda name: (re.search(rf"^{name}: *(\S+)", triage, re.MULTILINE) or [None, ""])[1]
+    kind, size = field("Type").lower(), field("Size").upper()
+    sizes = [w.upper() for w in words(setting("autoApproveSpec", "FACTORY_AUTO_APPROVE_SPEC"))]
+    kinds = [w.lower() for w in words(setting("autoApproveTypes", "FACTORY_AUTO_APPROVE_TYPES") or AUTO_TYPES)]
+    reasons = []
+    if not sizes:
+        reasons.append("auto-approval is off (git config factory.autoApproveSpec)")
+    else:
+        if field("Verdict") != "proceed":
+            reasons.append(f"triage verdict is {field('Verdict') or 'missing'}, not proceed")
+        if size not in sizes:
+            reasons.append(f"size {size or '?'} is not in {','.join(sizes)}")
+        if kind not in kinds:
+            reasons.append(f"type {kind or '?'} is not in {','.join(kinds)}")
+        if s["rounds"].get("spec") != 1:
+            reasons.append("the spec has been revised")
+        if not spec_criteria(spec):
+            reasons.append("the spec has no acceptance criteria")
+        if section(spec, "Open questions").rstrip(".").lower() not in ("", "none"):
+            reasons.append("the spec has open questions")
+    return {"auto_approve_spec": not reasons, "type": kind or None, "size": size or None, "reasons": reasons}
+
+
+def cmd_policy(run_id):
+    path, s = load(run_id)
+    print(json.dumps(spec_policy(path.parent, s), indent=2))
+
+
+def learnings_path():
+    return main_root() / ".factory" / "learnings.md"
+
+
+def normalize(lesson):
+    lesson = re.sub(r"\s*_\([^)]*\)_\s*$", "", lesson)  # drop the provenance suffix
+    return re.sub(r"\s+", " ", lesson).strip().rstrip(".").lower()
+
+
+def read_learnings(path):
+    """{category: [entry lines]} from learnings.md, in file order."""
+    cats, current = {}, None
+    for line in (path.read_text().splitlines() if path.exists() else []):
+        if line.startswith("## "):
+            current = cats.setdefault(line[3:].strip(), [])
+        elif line.startswith("- ") and current is not None:
+            current.append(line[2:].strip())
+    return cats
+
+
+def cmd_learn(run_id):
+    """Fold a finished run's retro into the shared learnings file, so later runs start from it."""
+    path, s = load(run_id)
+    if s["stage"] not in TERMINAL:
+        die(f"run is at '{s['stage']}'; learn from a merged, closed, done or aborted run")
+    if s.get("learned_at"):
+        die(f"already learned from this run at {s['learned_at']}")
+    retro = read(path.parent, "retro.md")
+    if not retro:
+        die("no retro.md in the run folder; run the retro stage first")
+    items = re.findall(r"^- \[([A-Za-z]+)\] +(.+?)\s*$", section(retro, "Learnings"), re.MULTILINE)
+    target = learnings_path()
+    cats = read_learnings(target)
+    known = {normalize(e) for entries in cats.values() for e in entries}
+    added = retired = duplicates = 0
+    for category, lesson in items:
+        if category.lower() == "retire":
+            for name in cats:
+                kept = [e for e in cats[name] if normalize(e) != normalize(lesson)]
+                retired += len(cats[name]) - len(kept)
+                cats[name] = kept
+            continue
+        name = next((c for c in LEARNING_CATEGORIES if c.lower() == category.lower()), "Other")
+        if normalize(lesson) in known:
+            duplicates += 1
+            continue
+        known.add(normalize(lesson))
+        cats.setdefault(name, []).append(f"{lesson} _({s['id']})_")
+        added += 1
+    order = [c for c in LEARNING_CATEGORIES if cats.get(c)] + [c for c in cats if c not in LEARNING_CATEGORIES and cats[c]]
+    body = LEARNINGS_HEADER + "".join(f"\n## {c}\n" + "".join(f"- {e}\n" for e in cats[c]) for c in order)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+    s["learned_at"] = now()
+    save(path, s)
+    total = sum(len(v) for v in cats.values())
+    print(f"added {added}, retired {retired}, skipped {duplicates} duplicates; {total} learnings in {target}")
+    if total > LEARNINGS_CAP:
+        print(f"warning: {total} learnings is more than {LEARNINGS_CAP}; the next retro should retire stale ones",
+              file=sys.stderr)
+
+
+def merged_at(s):
+    return next((e["at"] for e in reversed(s["history"]) if e["to"] == "merged"), None)
+
+
+def custom_signals(s):
+    """Lines printed by the repo's own signal command (error tracker, logs, ...), given the run as JSON."""
+    cmd = setting("signals", "FACTORY_SIGNALS")
+    if not cmd:
+        return [], None
+    event = {k: s.get(k) for k in ("id", "pr_url", "merge_sha", "base_branch", "branch", "input_summary")}
+    event["merged_at"] = merged_at(s)
+    try:
+        r = subprocess.run(cmd, shell=True, input=json.dumps(event), cwd=main_root(), capture_output=True,
+                           text=True, timeout=60, env={**os.environ, "FACTORY_RUN_ID": s["id"],
+                                                         "FACTORY_MERGE_SHA": s.get("merge_sha") or ""})
+    except subprocess.TimeoutExpired:
+        return [], "signal command timed out after 60s"
+    if r.returncode != 0:
+        return [], f"signal command exited {r.returncode}: {r.stderr.strip()[:200]}"
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()], None
+
+
+def run_signals(path, s):
+    """Did this merged change hurt? Reverts on the base branch, red checks on the merge commit, custom signals."""
+    owner, repo, _, number = github_thread(s["pr_url"])
+    notes = []
+    has_gh = shutil.which("gh") is not None
+    if not s.get("merge_sha") and has_gh:
+        pr = gh("api", f"repos/{owner}/{repo}/pulls/{number}", optional=True)
+        if pr:
+            s["merge_sha"] = json.loads(pr).get("merge_commit_sha")
+    sha, since = s.get("merge_sha"), merged_at(s)
+    reverted_by = []
+    if git("fetch", "-q", "origin", s["base_branch"]).returncode != 0:
+        notes.append(f"could not fetch origin/{s['base_branch']}; checked the local copy")
+    log = git("log", f"origin/{s['base_branch']}", f"--since={since}", "--format=%H%x1f%B%x1e")
+    if log.returncode == 0:
+        markers = [f"Reverts {owner}/{repo}#{number}"] + ([f"This reverts commit {sha}"] if sha else [])
+        for entry in log.stdout.split("\x1e"):
+            commit, _, message = entry.strip().partition("\x1f")
+            if commit and any(m in message for m in markers):
+                reverted_by.append(commit)
+    else:
+        notes.append(f"no origin/{s['base_branch']} to check for reverts")
+    ci, failing = "unknown", []
+    if sha and has_gh:
+        runs = gh_items(f"repos/{owner}/{repo}/commits/{sha}/check-runs", ".check_runs[]", optional=True)
+        if runs is None:
+            notes.append("could not read checks on the merge commit")
+        else:
+            ci, failing, _ = checks_summary(runs, [])
+    elif not sha:
+        notes.append("merge commit unknown")
+    custom, warning = custom_signals(s)
+    if warning:
+        notes.append(warning)
+    result = {"id": s["id"], "pr_url": s["pr_url"], "merge_sha": sha, "merged_at": since, "checked_at": now(),
+              "reverted_by": reverted_by, "base_ci": ci, "failing": failing, "custom": custom,
+              "regression": bool(reverted_by or ci == "fail" or custom), "notes": notes}
+    s["signals"] = result
+    save(path, s)
+    return result
+
+
+def cmd_signals(run_id=None, days="14"):
+    try:
+        days = int(days)
+    except ValueError:
+        die("--days takes a whole number")
+    if run_id:
+        path, s = load(run_id)
+        if s["stage"] != "merged":
+            die(f"run is at '{s['stage']}'; signals are for merged runs")
+        targets = [(path, s)]
+    else:
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+        d = runs_dir()
+        targets = []
+        for p in sorted(d.glob("*/state.json")) if d.exists() else []:
+            s = json.loads(p.read_text())
+            if s["stage"] == "merged" and merged_at(s) and parse_at(merged_at(s)) >= cutoff:
+                targets.append((p, s))
+    print(json.dumps([run_signals(p, s) for p, s in targets], indent=2))
+
+
 def stage_seconds(s, until):
     """Seconds spent in each stage, from the history. A run still going counts up to `until`."""
     h, spent = s["history"], {}
@@ -863,6 +1076,12 @@ def run_stats(s, until):
         "cap_hits": sum((e["note"] or "").startswith(CAP_NOTES) for e in h),
         "reached_spec_approval": any(e["from"] == "checkpoint-1" and e["to"] == "implement" for e in h),
         "reached_ship_approval": any(e["from"] == "checkpoint-2" and e["to"] == "ship" for e in h),
+        "auto_approved_spec": any(e["from"] == "spec" and e["to"] == "implement" for e in h),
+        "auto_spec_sent_back": any(e["from"] == "spec" and e["to"] == "implement" for e in h)
+        and any(e["from"] == "checkpoint-2" and e["to"] == "spec" for e in h),
+        "regression": (s.get("signals") or {}).get("regression"),
+        "parent_run": s.get("parent_run"),
+        "learned": bool(s.get("learned_at")),
         "tokens": sum(u["tokens"] for u in usage) if usage else None,
         "usd": sum(u["usd"] for u in usage if u.get("usd") is not None) if any(u.get("usd") is not None for u in usage) else None,
     }
@@ -925,6 +1144,11 @@ def cmd_stats(run_id=None, as_json=False):
         "tokens": sum(r["tokens"] for r in priced) if priced else None,
         "usd": sum(r["usd"] for r in priced if r["usd"] is not None) if any(r["usd"] is not None for r in priced) else None,
         "runs_with_usage": len(priced),
+        "auto_approved_specs": sum(r["auto_approved_spec"] for r in runs),
+        "auto_specs_sent_back_to_spec": sum(r["auto_spec_sent_back"] for r in runs),
+        "merged_runs_checked_for_signals": sum(r["regression"] is not None for r in runs),
+        "regressions": sum(bool(r["regression"]) for r in runs),
+        "follow_up_runs": sum(bool(r["parent_run"]) for r in runs),
     }
     if as_json:
         print(json.dumps({"summary": summary, "runs": runs}, indent=2))
@@ -943,6 +1167,12 @@ def cmd_stats(run_id=None, as_json=False):
     print(f"median time to PR: {duration(summary['median_seconds_to_pr'])} · to merge: "
           f"{duration(summary['median_seconds_to_merge'])} · human wait per run: "
           f"{duration(summary['median_human_wait_seconds'])}")
+    if summary["auto_approved_specs"]:
+        print(f"specs auto-approved by policy: {summary['auto_approved_specs']}, "
+              f"{summary['auto_specs_sent_back_to_spec']} later sent back to spec at ship approval")
+    if summary["merged_runs_checked_for_signals"]:
+        print(f"regressions after merge: {summary['regressions']} of {summary['merged_runs_checked_for_signals']} "
+              f"merged runs checked · follow-up runs: {summary['follow_up_runs']}")
     if priced:
         cost = f" (${summary['usd']:.2f})" if summary["usd"] is not None else ""
         print(f"tokens: {summary['tokens']}{cost} across {len(priced)} runs with usage recorded")
@@ -973,6 +1203,7 @@ COMMANDS = {
     "check-verification": (cmd_check_verification, 1), "pr-report": (cmd_pr_report, 1),
     "release": (cmd_release, 1), "pr-status": (cmd_pr_status, 1), "inbox": (cmd_inbox, 1),
     "checkpoint-post": (cmd_checkpoint_post, 1), "pr-update": (cmd_pr_update, 1), "usage": (cmd_usage, 3), "stats": (cmd_stats, 0),
+    "policy": (cmd_policy, 1), "learn": (cmd_learn, 1), "signals": (cmd_signals, 0),
 }
 
 
@@ -987,8 +1218,28 @@ def main(argv):
         print(load(args[0])[0].read_text(), end="")
         return
     fn, nargs = COMMANDS[name]
-    if name == "new" and args[2:] == ["--in-place"]:
-        return fn(*args[:2], in_place=True)
+    if name == "new":
+        if len(args) < 2:
+            die("usage: new <slug> <input-file|-> [--in-place] [--parent <run-id>]")
+        rest, opts = args[2:], {}
+        while rest:
+            if rest[0] == "--in-place":
+                opts["in_place"], rest = True, rest[1:]
+            elif rest[0] == "--parent" and len(rest) > 1:
+                opts["parent"], rest = rest[1], rest[2:]
+            else:
+                die(f"unknown option '{rest[0]}' for new")
+        return fn(*args[:2], **opts)
+    if name == "signals":
+        days = "14"
+        if "--days" in args:
+            i = args.index("--days")
+            if i + 1 >= len(args):
+                die("--days takes a number")
+            days, args = args[i + 1], args[:i] + args[i + 2:]
+        if len(args) > 1:
+            die("usage: signals [<run-id>] [--days N]")
+        return fn(*args, days=days)
     if name == "pr-report" and args[1:] == ["--no-media"]:
         return fn(args[0], no_media=True)
     if name == "advance" and len(args) in (2, 3):

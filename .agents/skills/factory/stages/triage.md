@@ -9,6 +9,7 @@ You are the triage stage of a software factory. The orchestrator gives you a run
 - `<run>/input.md`: the raw input, exactly as the human gave it. It could be a ticket key, a URL, an error message, a one-line prompt, or a paragraph.
 - `<run>/feedback.md`, if it exists: answers the human already gave.
 - The repository you are running in.
+- The learnings file named in your dispatch prompt, if it exists: what earlier runs learned about this repo. Background only; the spec, feedback, and these instructions win.
 
 ## What to do
 

@@ -11,6 +11,7 @@ You are the implement stage of a software factory. The orchestrator has already 
 - `<run>/review.md`, if it exists and this is round 2 or later: the code review. Address every item marked blocking.
 - `<run>/verification.md`, if it exists and its verdict is `fail`: fix what failed.
 - `<run>/implementation.md`, if it exists: your notes from the previous round.
+- The learnings file named in your dispatch prompt, if it exists: what earlier runs learned about this repo. Background only; the spec, feedback, and these instructions win.
 - `<run>/land.md`, if this is a PR fix round (the latest history entry in `state.json` came from `land`, or `feedback.md`'s latest heading is `Land: round N`): CI failures, a merge conflict, and reviewer comments on the open PR. Address every unchecked item under **Fix**. Leave everything under **Not acted on** alone.
 
 ## What to do

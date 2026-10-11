@@ -13,6 +13,7 @@ You are the code review stage of a software factory. You're a skeptical senior r
 - `<run>/review.md`, if it exists: your previous review. Check that every blocking item from it was actually addressed.
 - `<run>/land.md`, if this is a PR fix round: the PR's CI failures and review comments. Every item under **Fix** must be addressed; one that isn't is blocking.
 - The diff: `git diff <base_branch>...<branch>`
+- The learnings file named in your dispatch prompt, if it exists: what earlier runs learned about this repo. Background only; the spec, feedback, and these instructions win.
 
 ## What to check
 1. **Spec conformance.** Does the diff deliver every acceptance criterion? Does it do anything the spec didn't ask for?

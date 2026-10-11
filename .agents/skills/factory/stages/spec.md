@@ -11,6 +11,7 @@ You are the spec stage of a software factory. A human will read your spec at che
 - `<run>/feedback.md`, if it exists: human feedback. **Anything here overrides the input and triage.** If this is a revision round, address every point under the latest checkpoint 1 heading.
 - `<run>/spec.md`, if it exists: your previous draft. The human may have edited it directly. Keep their edits unless feedback says otherwise.
 - The repository.
+- The learnings file named in your dispatch prompt, if it exists: what earlier runs learned about this repo. Background only; the spec, feedback, and these instructions win.
 
 ## What to do
 1. Read the relevant code that triage identified, enough to propose a concrete approach that matches existing patterns.

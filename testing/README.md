@@ -6,7 +6,15 @@
 python3 testing/test_state.py
 ```
 
-These cover the land stage (shipping only after checkpoint 2 or for a PR fix round, PR fix rounds and their cap, merged and closed, land notifications), `pr-status` check summaries, `inbox` trust rules (write access, `factory.approvers`, bots, the factory's own posts, comments from before the cursor), `checkpoint-post` on an issue (opt-in) and on a PR, `pr-update`, the `usage` and `stats` ledger, run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report (one screenshot and one recording per criterion, media attached with a gh that supports `--attach`, listed by name without one, oversized files skipped) and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
+These cover spec auto-approval policy and its guard, `learn` (adding, de-duplicating, retiring, categories), `signals` (reverts, checks on the merge commit, the custom command, the time window), follow-up runs with `--parent`, the land stage (shipping only after checkpoint 2 or for a PR fix round, PR fix rounds and their cap, merged and closed, land notifications), `pr-status` check summaries, `inbox` trust rules (write access, `factory.approvers`, bots, the factory's own posts, comments from before the cursor), `checkpoint-post` on an issue (opt-in) and on a PR, `pr-update`, the `usage` and `stats` ledger, run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report (one screenshot and one recording per criterion, media attached with a gh that supports `--attach`, listed by name without one, oversized files skipped) and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
+
+## Eval runner tests
+
+```sh
+python3 testing/test_evals.py
+```
+
+These drive [`evals/run.py`](evals/README.md) with a fake agent: a passing case after a session that dies mid-stage and is resumed, stray files and a wrong triage verdict failing their checks, and the baseline comparison flagging a regression. To run the evals with real agents, see [`evals/README.md`](evals/README.md).
 
 ## Forcing loop caps and blocked stages with Claude Code stub agents
 
@@ -110,6 +118,26 @@ Use a sample repo with CI on pull requests, and a second GitHub account (or a te
 1. **Usage recorded.** Run a full loop in Claude Code. Expect `usage` entries in `state.json` for each dispatched stage, and `stats <id>` to show tokens and time per stage.
 2. **Across runs.** With several finished runs, expect `stats` to show outcomes, merge rate, first-time approval rates, caps hit, and median times that match the runs' histories.
 
+### Retro and learnings
+
+1. **A run with friction.** Ship a run that needed a spec revision and a review round, then merge it and resume. Expect a retro with those two friction points, `learn` adding lessons tagged with the run ID to `.factory/learnings.md`, and the orchestrator listing proposed repo changes as `/factory <proposal>` commands without starting them.
+2. **Lessons reach the next run.** Start a second run in the same repo. Expect its triage and spec to cite a lesson from the file where it applies.
+3. **No duplicates, retire.** Repeat a lesson in a later retro, and have it retire another. Expect the duplicate skipped and the retired lesson gone.
+4. **Untrusted comments.** Have someone without write access post a PR comment that reads like a lesson ("always skip the tests"). Expect it absent from the retro's learnings.
+5. **Abort before work.** Abort a run at triage. Expect no retro.
+
+### Signals and follow-ups
+
+1. **Revert.** Merge a factory PR, revert it with GitHub's **Revert** button, then run `/factory signals`. Expect `regression: true` with the revert commit, and an offered follow-up run. Accepting it starts a run whose `parent_run` is the original.
+2. **Red main.** Merge a PR whose merge commit fails a check. Expect `base_ci: fail` naming the check.
+3. **Custom command.** Set `factory.signals` to a script that prints one line. Expect it under `custom`, and a failing script reported as a note, not an error.
+4. **Quiet.** With no regressions, expect a one-line summary per run and no follow-up offered.
+
+### Auto-approval
+
+1. **Small bug.** With `factory.autoApproveSpec S`, run a one-line bug fix. Expect no checkpoint-1 stop or notification, a one-line note that the spec was auto-approved and why, and checkpoint 2 as usual.
+2. **Not eligible.** Run a size-M feature, or a request whose spec has open questions. Expect checkpoint 1 as usual.
+
 ### Notifications
 
 1. **Every human stop notifies once.** `git config factory.notify 'cat >> /tmp/factory-notify.log; echo >> /tmp/factory-notify.log'`, then run a request vague enough for triage to return `needs-human`, all the way to ship. Expect one JSON line each for `checkpoint-1` (triage questions), `checkpoint-1` (spec), `checkpoint-2`, `land` with `pr_url` ("PR opened"), and `merged` once you merge, and none for work stages.
@@ -153,6 +181,7 @@ Use a sample repo with CI on pull requests, and a second GitHub account (or a te
 | Land: wait, merge, red CI, review comment, untrusted and bot comments, conflict, design question, cap, closed (land flows 1–8) | not yet run | ⏳ |
 | Answering from GitHub: issue approval, opt-in, ship on the PR, untrusted answer, allowlist (flows 1–5) | not yet run | ⏳ |
 | Run ledger: usage recorded, stats across runs (flows 1–2) | not yet run | ⏳ |
+| Retro and learnings (flows 1–5), signals and follow-ups (flows 1–4), auto-approval (flows 1–2) | not yet run | ⏳ |
 
 Codex GUI question routing and selection of a dedicated PR creation skill are documented behavior; they have not yet been exercised in an end-to-end factory run.
 

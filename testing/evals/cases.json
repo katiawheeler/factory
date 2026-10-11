@@ -1,0 +1,40 @@
+[
+  {
+    "id": "word-count-whitespace",
+    "input": "Bug: `python3 -m textstat words 'a  b  c'` prints 5, but there are 3 words. Word counts are wrong whenever words are separated by more than one space, by tabs, or by newlines, and an empty string counts as 1 word.",
+    "expect": {
+      "triage": ["proceed"],
+      "stage": "checkpoint-2",
+      "verification": "pass",
+      "hidden_test": "hidden/word_count_whitespace.py",
+      "files": ["textstat/core.py", "tests/*"]
+    }
+  },
+  {
+    "id": "json-output",
+    "input": "Add a `--json` flag to `python3 -m textstat stats FILE` that prints the result as a JSON object with exactly the keys `lines`, `words`, and `chars` (integers, same values as the plain output). Without the flag, the output must stay exactly as it is.",
+    "expect": {
+      "triage": ["proceed"],
+      "stage": "checkpoint-2",
+      "verification": "pass",
+      "hidden_test": "hidden/json_output.py",
+      "files": ["textstat/cli.py", "textstat/core.py", "tests/*", "README.md"]
+    }
+  },
+  {
+    "id": "vague-request",
+    "input": "make textstat better",
+    "expect": {
+      "triage": ["needs-human"],
+      "stage": "checkpoint-1"
+    }
+  },
+  {
+    "id": "out-of-scope",
+    "input": "Port textstat to Rust, publish it on crates.io, and set up a Homebrew tap for it.",
+    "expect": {
+      "triage": ["reject", "needs-human"],
+      "stage": "checkpoint-1"
+    }
+  }
+]

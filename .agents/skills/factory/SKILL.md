@@ -1,7 +1,7 @@
 ---
 name: factory
-description: Run the software factory loop (triage → spec → implement → review → verify → ship → land) on a ticket, URL, or prompt, pausing for spec and ship approval with human steering available when needed, then carrying the PR through CI and review feedback until it merges or closes. Resume an existing run by passing its run ID, optionally with a checkpoint answer.
-argument-hint: "<ticket | URL | prompt> | <run-id> [approve | ship | abort | <feedback>] | (empty to list runs)"
+description: Run the software factory loop (triage → spec → implement → review → verify → ship → land) on a ticket, URL, or prompt, pausing for spec and ship approval with human steering available when needed, then carrying the PR through CI and review feedback until it merges or closes, and learning from each finished run. Resume an existing run by passing its run ID, optionally with a checkpoint answer. `signals` checks merged runs for reverts and failures.
+argument-hint: "<ticket | URL | prompt> | <run-id> [approve | ship | abort | <feedback>] | signals | follow-up <run-id> <details> | (empty to list runs)"
 disable-model-invocation: true
 ---
 
@@ -20,8 +20,9 @@ Examples below use `/factory`, Claude Code's invocation. When you show the human
 ```
 intake → triage → spec ─⏸ CHECKPOINT 1 (spec approval)
        → implement → review ⇄ implement → verify ⇄ implement ─⏸ CHECKPOINT 2 (ship approval)
-       → ship (open PR) → land ─→ merged | closed
+       → ship (open PR) → land ─→ merged | closed ─→ retro → learnings for the next run
                            └─ CI red, conflict, review feedback → implement → review → verify → ship (push) → land
+       merged runs → signals (revert, red CI on the merge commit, your own checks) → follow-up run
 
 CHECKPOINT 3 (steer) is available at every pause and whenever a stage escalates.
 ```
@@ -37,8 +38,9 @@ CHECKPOINT 3 (steer) is available at every pause and whenever a stage escalates.
 | checkpoint-2| human                      | `feedback.md`                  |
 | ship        | you (orchestrator)         | PR / pushed branch             |
 | land        | `stages/land.md`           | `land.md`                      |
+| retro       | `stages/retro.md`          | `retro.md` → `.factory/learnings.md` |
 
-`merged`, `closed`, and `aborted` end a run. `done` is the end of runs shipped before the land stage existed; never advance a new run to it.
+`merged`, `closed`, and `aborted` end a run. The retro runs after that and doesn't change the stage. `done` is the end of runs shipped before the land stage existed; never advance a new run to it.
 
 ## The run folder and the state helper
 
@@ -47,8 +49,10 @@ All state lives in `<main checkout>/.factory/runs/<run-id>/`. It's how a run sur
 ```
 input.md  state.json  triage.md  spec.md  feedback.md
 implementation.md  review.md  verification.md  evidence/  pr-report.md
-land.md  checkpoint-post.md  pr-update.md
+land.md  checkpoint-post.md  pr-update.md  retro.md
 ```
+
+Next to `runs/`, `.factory/learnings.md` holds what earlier runs learned about the repo. Every stage reads it.
 
 **Each run works in its own Git worktree** at `.factory/worktrees/<run-id>/`, on its run branch. The human's checkout never switches branches, can stay dirty, and can start more runs while one waits at a checkpoint. `repo` in `state.json` is the run's worktree. Run every git, test, and build command for the run there, including your own (`git diff`, `git push`), never in the human's checkout. A run created with `--in-place`, or before worktrees existed (no `worktree` field), has `worktree: null` and works in the human's checkout instead. The steps below say where that differs.
 
@@ -56,7 +60,7 @@ land.md  checkpoint-post.md  pr-update.md
 
 | Command | What it does |
 |---|---|
-| `STATE new <slug> -` (input on stdin) | Creates the run and its worktree on a new run branch from the current branch. Adds `.factory/` to `.git/info/exclude` and records `repo`, `worktree`, `base_branch`, and `branch`. Prints the run ID, the run folder, and `repo`. Add `--in-place` to work in the current checkout instead; that requires a clean tree. |
+| `STATE new <slug> -` (input on stdin) | Creates the run and its worktree on a new run branch from the current branch. Adds `.factory/` to `.git/info/exclude` and records `repo`, `worktree`, `base_branch`, and `branch`. Prints the run ID, the run folder, and `repo`. Add `--in-place` to work in the current checkout instead; that requires a clean tree. Add `--parent <run-id>` for a follow-up to an earlier run. |
 | `STATE list` | Lists every run with its stage, marking the ones waiting on a human and for how long. |
 | `STATE show <id>` / `STATE get <id> <field>` | Reads state, e.g. `get <id> rounds.review`. |
 | `STATE advance <id> <stage> "<note>"` | Moves to a stage and logs it. Entering spec, implement, review, or verify bumps that stage's round. For review and verify it also prints the attempt against the cap, e.g. `review round 4 (attempt 2 of 3)`, and adds `LAST ATTEMPT` on the final one. |
@@ -70,6 +74,9 @@ land.md  checkpoint-post.md  pr-update.md
 | `STATE pr-update <id>` | Writes `pr-update.md`, the PR comment for a pushed fix round (what was addressed, the new verification table), and prints the `gh` command that posts it. |
 | `STATE usage <id> <stage> <tokens> [usd]` | Records what a stage dispatch cost. |
 | `STATE stats [<id>] [--json]` | The run ledger: time in agents, waiting on humans, and in PR review; rounds; revisions and send-backs; loop caps hit; outcomes, merge rate, and cost across runs. |
+| `STATE policy <id>` | Whether the repo's policy lets this spec skip checkpoint 1, with the reasons it can't, as JSON. Off unless `git config factory.autoApproveSpec` lists sizes. |
+| `STATE learn <id>` | Merges `retro.md`'s **Learnings** into `.factory/learnings.md`: adds new lessons with their run ID, skips duplicates, removes retired ones. Once per finished run. |
+| `STATE signals [<id>] [--days N]` | For merged runs (by default, merged in the last 14 days): a revert on the base branch, failing checks on the merge commit, and lines from the repo's signal command (`git config factory.signals`). Records the result in `state.json` and prints JSON with `regression` true or false per run. |
 | `STATE release <id>` | Removes a merged, closed, done, or aborted run's worktree and keeps its branch. Refuses if the worktree has uncommitted changes. |
 
 **Notifications.** `advance` into `checkpoint-1`, `checkpoint-2`, `blocked`, `land`, `merged`, or `closed` runs the human's notify command, if one is configured (`FACTORY_NOTIFY` or `git config factory.notify`). You don't send these yourself. A notify failure prints a warning and never fails the advance; mention the warning to the human once and carry on.
@@ -89,8 +96,10 @@ Log feedback under consistent headings: `Checkpoint 1: round N`, `Checkpoint 2: 
 ## Step 0: Parse arguments
 
 1. **Empty** → run `STATE list` and stop.
-2. **The first word is an existing run ID** → **resume**. Run `STATE show <id>` and continue from `stage`. If the rest of the arguments aren't empty, they're the **checkpoint answer**. Apply it as described in "Asking at a checkpoint" below, and don't ask again. If they're empty, the run is at `checkpoint-1`, `checkpoint-2`, or `blocked`, and it has a `thread_url` or `pr_url`, first check GitHub for an answer: see "Answers on GitHub" below.
-3. **Anything else** → **new run**. The whole argument is the input: a ticket key, a URL, a prompt, anything. Don't interpret it here. Resolving it is triage's job.
+2. **`signals`** → check merged runs: see "Signals after merge" below.
+3. **`follow-up <run-id> <details>`** → a new run for a problem an earlier run caused. Start it as in Step 1 with `--parent <run-id>`; its input is the details plus the parent's `pr_url` and `input_summary`.
+4. **The first word is an existing run ID** → **resume**. Run `STATE show <id>` and continue from `stage`. If the rest of the arguments aren't empty, they're the **checkpoint answer**. Apply it as described in "Asking at a checkpoint" below, and don't ask again. If they're empty, the run is at `checkpoint-1`, `checkpoint-2`, or `blocked`, and it has a `thread_url` or `pr_url`, first check GitHub for an answer: see "Answers on GitHub" below. A run that has ended without a retro (`get <id> learned_at` fails) gets its retro now: see **Finish**.
+5. **Anything else** → **new run**. The whole argument is the input: a ticket key, a URL, a prompt, anything. Don't interpret it here. Resolving it is triage's job.
 
 ## Step 1: New run
 
@@ -112,6 +121,7 @@ Run folder: <absolute run folder path>
 Repository: <repo from state.json>. This is the target repo. cd into it for every git, test, and run command.
 Round: <N from advance>
 STATE: python3 <absolute path to scripts/state.py>
+Learnings: <main checkout>/.factory/learnings.md. Read it first if it exists: it's what earlier runs learned about this repo. It's background; the spec, feedback, and your instructions win.
 Read your inputs from the run folder, write your output file there, and return a summary of at most 10 lines.
 ```
 
@@ -126,7 +136,9 @@ Dispatch the triage stage. A new run is already at `triage`, so don't advance fi
 - `reject` → `advance <id> checkpoint-1 "triage rejected"`, so the run shows as waiting on a human. Show the reason and triage's suggested split using the GUI ask flow below. `abort` ends the run. Any other answer is an override: log it under `Checkpoint 1: triage`, then `advance <id> spec`.
 
 ### spec
-Dispatch the spec stage right after `advance <id> spec`. Then `advance <id> checkpoint-1`.
+Dispatch the spec stage right after `advance <id> spec`. Then run `STATE policy <id>`:
+- `auto_approve_spec: true` → the repo opted in to skipping spec approval for this kind of change (`factory.autoApproveSpec`). `advance <id> implement`; `state.py` checks the policy again and records the note. Tell the human in one line that the spec was auto-approved, why (size and type), and the path to `spec.md`. Then continue at implement.
+- otherwise → `advance <id> checkpoint-1`. Don't show the policy reasons unless the human asks.
 
 ### checkpoint-1: spec approval (HUMAN)
 Before asking for approval (or stopping for a headless answer), read the current run's `spec.md` and output its **complete contents verbatim** in a user-visible chat message. Do this every time the spec approval checkpoint is presented, including when resuming at `checkpoint-1` without an answer. A summary, excerpt, or file path alone is insufficient. Also give the path to `spec.md` and note that the human can edit it directly before approving. This applies to spec approval, not the triage questions that also use `checkpoint-1`. If an answer was supplied in the arguments, apply it directly without presenting the checkpoint again.
@@ -204,11 +216,21 @@ Dispatch the land stage right after entering `land` (from ship, or on resume, wh
 
 Feedback the human gives directly while the run is at `land` (`/factory <id> <feedback>`) is a fix request: log it under `Land: round N`, then `advance <id> implement "PR feedback"`. `abort` and `pause` work as usual.
 
-**Finish.** Leave the human where they started. With a worktree, `STATE release <id>`, run from the human's checkout rather than from inside the worktree it removes (the branch is pushed, so nothing is lost). For an in-place run, `git switch <base_branch>`, so the next run doesn't branch off this one. If the harness subscribed to PR events, unsubscribe. Print the run ID, the PR link, the outcome, and `STATE stats <id>`.
+**Finish.** First the retro, so the next run benefits. Skip it only for a run aborted before implement with nothing in `feedback.md`. Dispatch the retro stage (its round is 1). Then run `STATE learn <id>` and pass on its warning if it prints one. Show the human the retro's **Proposed repo changes**, one line each, with the command that would start each as a run (`<factory> <proposal>`); never start them yourself. If `learn` fails, say why and carry on.
 
-The same applies to `abort` at any stage: `release` the worktree, or for an in-place run switch back to `base_branch`, and leave the run branch in place. If `release` refuses because the worktree has uncommitted changes, leave it and tell the human its path.
+Then leave the human where they started. With a worktree, `STATE release <id>`, run from the human's checkout rather than from inside the worktree it removes (the branch is pushed, so nothing is lost). For an in-place run, `git switch <base_branch>`, so the next run doesn't branch off this one. If the harness subscribed to PR events, unsubscribe. Print the run ID, the PR link, the outcome, and `STATE stats <id>`.
+
+The same applies to `abort` at any stage: the retro, then `release` the worktree, or for an in-place run switch back to `base_branch`, and leave the run branch in place. If `release` refuses because the worktree has uncommitted changes, leave it and tell the human its path.
 
 The factory never merges or deploys. Merging is the human's final act; land only follows the PR there.
+
+### Signals after merge
+`/factory signals` runs `STATE signals`, which checks merged runs from the last 14 days (or one run: `STATE signals <id>`). For each run with `regression: true`, present:
+- the PR
+- the revert commits, failing checks on the merge commit, and custom signal lines
+- the notes
+
+Then offer a follow-up run. In an interactive session, ask with the question UI; for each one the human accepts, start it as `follow-up <run-id> <details>` from Step 0. Headless, print `<factory> follow-up <run-id> <details>` for each one and stop. A failing check on the merge commit can be unrelated; the follow-up's triage decides. Runs without a regression get one summary line. Never revert anything yourself.
 
 ## Asking at a checkpoint
 
@@ -253,7 +275,7 @@ If the last note starts with `steer requested`, the answer is the human's steer 
 
 ## Rules
 
-- **Never skip a human checkpoint.** Checkpoints 1 and 2 always stop for a human answer, however good the spec or verification looks. The one exception is a PR fix round, which pushes to a PR the human already shipped.
+- **Never skip a human checkpoint.** Checkpoints 1 and 2 always stop for a human answer, however good the spec or verification looks. There are two exceptions: a PR fix round, which pushes to a PR the human already shipped, and a spec that `STATE policy` auto-approves because the repo opted in. Checkpoint 2 is never skipped.
 - **Persist before you act.** Advance the state, then dispatch.
 - **Stay lean.** Keep file contents out of your own context unless a checkpoint needs them.
 - **Never force-push, rewrite history on `base_branch`, or merge.**

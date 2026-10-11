@@ -353,6 +353,110 @@ else:
         self.assertEqual((all_runs["spec_approved_first_time"], all_runs["ship_approved_first_time"]), (0.0, 0.0))
         self.assertIn("merge rate: 100% of 1 finished PRs", self.run_state("stats").stdout)
 
+    def policy_run(self, size="S", kind="bug", questions="None.", verdict="proceed"):
+        folder = self.repo / ".factory/runs" / self.id
+        (folder / "triage.md").write_text(f"# Triage\n\nVerdict: {verdict}\n\n## Classification\nType: {kind}\nSize: {size}\n")
+        (folder / "spec.md").write_text("# Spec: x\n\n## Acceptance criteria\n- [ ] AC1: works\n\n"
+                                        f"## Approach\nDo it.\n\n## Open questions\n{questions}\n")
+        self.advance("spec")
+
+    def test_spec_needs_human_approval_unless_policy_allows(self):
+        self.policy_run()
+        err = self.run_state("advance", self.id, "implement", ok=False).stderr
+        self.assertIn("auto-approval is off", err)
+        self.git("config", "factory.autoApproveSpec", "S")
+        out = json.loads(self.run_state("policy", self.id).stdout)
+        self.assertEqual((out["auto_approve_spec"], out["size"], out["type"]), (True, "S", "bug"))
+        self.advance("implement")
+        self.assertEqual(self.state()["history"][-1]["note"], "spec auto-approved by policy (size S, type bug)")
+        stats = json.loads(self.run_state("stats", "--json").stdout)["summary"]
+        self.assertEqual(stats["auto_approved_specs"], 1)
+
+    def test_policy_reasons(self):
+        self.policy_run(size="M", kind="feature", questions="- Q: which? **Default if unanswered:** a",
+                        verdict="needs-human")
+        reasons = json.loads(self.run_state("policy", self.id, env={"FACTORY_AUTO_APPROVE_SPEC": "S"}).stdout)["reasons"]
+        self.assertEqual(reasons, ["triage verdict is needs-human, not proceed", "size M is not in S",
+                                   "type feature is not in bug,chore", "the spec has open questions"])
+        env = {"FACTORY_AUTO_APPROVE_SPEC": "S,M", "FACTORY_AUTO_APPROVE_TYPES": "feature"}
+        self.advance("checkpoint-1")
+        self.run_state("advance", self.id, "spec", "revise")
+        reasons = json.loads(self.run_state("policy", self.id, env=env).stdout)["reasons"]
+        self.assertIn("the spec has been revised", reasons)
+        self.assertNotIn("size M is not in S,M", reasons)
+
+    def test_new_links_a_follow_up_to_its_parent(self):
+        self.run_state("new", "fix", "-", "--parent", "nope", input="x", ok=False)
+        child = self.run_state("new", "fix", "-", "--parent", self.id, "--in-place", input="x").stdout.split()[0]
+        s = json.loads((self.repo / ".factory/runs" / child / "state.json").read_text())
+        self.assertEqual((s["parent_run"], s["worktree"]), (self.id, None))
+        self.assertIn("unknown option", self.run_state("new", "a", "-", "--bogus", ok=False).stderr)
+
+    def finished_run(self, stage="merged"):
+        self.ship()
+        self.advance(stage)
+        return self.repo / ".factory/runs" / self.id
+
+    def test_learn_merges_retro_into_learnings(self):
+        self.assertIn("learn from a merged", self.run_state("learn", self.id, ok=False).stderr)
+        folder = self.finished_run()
+        self.assertIn("no retro.md", self.run_state("learn", self.id, ok=False).stderr)
+        (folder / "retro.md").write_text("# Retro\n\n## Learnings\n- [Commands] Run tests with `make test`.\n"
+                                         "- [pitfalls] The API client caches tokens per process.\n"
+                                         "- [Weird] Something else\n\n## Proposed repo changes\nNone.\n")
+        out = self.run_state("learn", self.id).stdout
+        self.assertIn("added 3, retired 0, skipped 0 duplicates; 3 learnings", out)
+        text = (self.repo / ".factory/learnings.md").read_text()
+        self.assertIn(f"## Commands\n- Run tests with `make test`. _({self.id})_\n", text)
+        self.assertIn("## Pitfalls\n- The API client caches tokens per process.", text)
+        self.assertLess(text.index("## Pitfalls"), text.index("## Other"))
+        self.assertIn("already learned", self.run_state("learn", self.id, ok=False).stderr)
+
+        first = self.id
+        self.id = self.run_state("new", "b", "-", input="x").stdout.split()[0]
+        folder = self.finished_run("closed")
+        (folder / "retro.md").write_text("## Learnings\n- [Commands] run tests with `make test`\n"
+                                         "- [Retire] The API client caches tokens per process\n"
+                                         "- [Review] Reviewers want a changelog entry.\n")
+        self.assertIn("added 1, retired 1, skipped 1 duplicates; 3 learnings", self.run_state("learn", self.id).stdout)
+        text = (self.repo / ".factory/learnings.md").read_text()
+        self.assertNotIn("caches tokens", text)
+        self.assertNotIn("## Pitfalls", text)
+        self.assertIn(f"`make test`. _({first})_", text)
+
+    def test_signals_find_reverts_and_custom_signals(self):
+        remote = self.repo.parent / f"{self.repo.name}-remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        self.addCleanup(shutil.rmtree, remote, ignore_errors=True)
+        self.git("remote", "add", "origin", str(remote))
+        self.assertIn("signals are for merged runs", self.run_state("signals", self.id, ok=False).stderr)
+        self.finished_run()
+        commit = lambda msg: self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", msg)
+        commit("unrelated")
+        commit('Revert "Fix login"\n\nReverts o/r#7')
+        self.git("push", "-q", "origin", "main")
+        env = {"FACTORY_SIGNALS": 'python3 -c "import json,sys; e=json.load(sys.stdin); print(\'errors up after \' + e[\'id\'])"',
+               "PATH": "/usr/bin:/bin"}  # no gh: the merge commit and its checks are unknown
+        [result] = json.loads(self.run_state("signals", env=env).stdout)
+        self.assertEqual(len(result["reverted_by"]), 1)
+        self.assertEqual(result["custom"], [f"errors up after {self.id}"])
+        self.assertTrue(result["regression"])
+        self.assertIn("merge commit unknown", result["notes"])
+        self.assertTrue(self.state()["signals"]["regression"])
+        self.assertEqual(json.loads(self.run_state("signals", "--days", "0", env=env).stdout), [])
+        stats = json.loads(self.run_state("stats", "--json").stdout)["summary"]
+        self.assertEqual((stats["regressions"], stats["merged_runs_checked_for_signals"]), (1, 1))
+
+    def test_signals_read_checks_on_the_merge_commit(self):
+        self.finished_run()
+        env = self.github({"repos/o/r/pulls/7": {"merge_commit_sha": "m1"},
+                           "repos/o/r/commits/m1/check-runs": {"check_runs": [
+                               {"name": "deploy", "status": "completed", "conclusion": "failure", "details_url": "d"}]}})
+        [result] = json.loads(self.run_state("signals", self.id, env=env).stdout)
+        self.assertEqual((result["merge_sha"], result["base_ci"], result["reverted_by"]), ("m1", "fail", []))
+        self.assertTrue(result["regression"])
+        self.assertEqual(self.state()["merge_sha"], "m1")
+
     def test_set_guards(self):
         for field in ("stage", "rounds", "loop", "history", "id", "repo", "branch", "base_branch", "worktree"):
             self.run_state("set", self.id, field, "x", ok=False)

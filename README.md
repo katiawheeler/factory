@@ -1,6 +1,6 @@
 # factory
 
-A software factory workflow for any coding agent that can read the skill and run Git and Python commands. Give it a ticket, URL, or prompt; it triages the request, writes a spec, implements it on a branch, reviews the diff, verifies the acceptance criteria, opens a PR after human approval, and then carries that PR through CI failures and review comments until it merges or closes. It never merges or deploys; merging stays a human's call. Inspired by Warp's [guide to cloud software factories](https://www.warp.dev/blog/a-guide-to-cloud-software-factories-for-engineering-leaders).
+A software factory workflow for any coding agent that can read the skill and run Git and Python commands. Give it a ticket, URL, or prompt; it triages the request, writes a spec, implements it on a branch, reviews the diff, verifies the acceptance criteria, opens a PR after human approval, and then carries that PR through CI failures and review comments until it merges or closes. Each finished run ends with a retro that teaches the next run, and merged runs can be checked for reverts and failures. It never merges or deploys; merging stays a human's call. Inspired by Warp's [guide to cloud software factories](https://www.warp.dev/blog/a-guide-to-cloud-software-factories-for-engineering-leaders).
 
 ```text
 <factory> <ticket | URL | prompt>
@@ -23,6 +23,7 @@ Agents write their outputs to `.factory/runs/<run-id>/`. Each run works in its o
 | Verify | `verification.md` and `evidence/`, with a suite result and one result per criterion | Checkpoint 2: inspect evidence, ship, or send work back |
 | Ship | Pushed branch, PR, and a PR comment with the spec and evidence | Only after the human says **Ship** |
 | Land | `land.md`: the PR's state, CI failures, and review comments sorted into fixes, questions, and things not acted on | Reviewers review and merge; questions come to the human |
+| Retro | `retro.md`, folded into `.factory/learnings.md` | Proposed repo changes are offered as new runs |
 
 Review gets three consecutive attempts; verification gets three attempts between human checkpoints; PR fix rounds get three between human checkpoints. A cap sends the run to checkpoint 2 with the problem stated. Failed verification returns to implementation, then review, then verification. An environment limitation can go straight to checkpoint 2 with the affected criteria named.
 
@@ -38,6 +39,9 @@ Replace `<factory>` with your agent's invocation syntax:
 <factory> <run-id> ship           Approve checkpoint 2 and create a PR
 <factory> <run-id> <feedback>     Request changes, answer a blocked agent, or ask for a PR fix
 <factory> <run-id> pause|abort    Pause or abort
+<factory> signals                 Check recently merged runs for reverts and failures
+<factory> follow-up <run-id> <details>
+                                  Start a run for a problem an earlier run caused
 ```
 
 In an interactive session, the factory uses the host's question UI when available. Otherwise it asks in chat and waits for a reply. It never treats a preselected choice as an answer. Headless runs can pass answers as command arguments and resume from the recorded stage, or take them from GitHub comments; see [Answering from GitHub](#answering-from-github).
@@ -97,6 +101,39 @@ The spec is then posted on the issue for approval, and the ship decision with it
 
 `state.py stats <run-id>` breaks one run down by stage. When the host reports a subagent's token usage, the orchestrator records it with `state.py usage`, and `stats` adds tokens and cost. `--json` gives machine-readable output.
 
+### Learning from each run
+
+When a run ends (merged, closed, or aborted after work began), a retro stage looks for where it lost time or needed a human to correct it: spec revisions, send-backs, review rounds, failed verification, PR fix rounds, steers, and problems after merge. It records the causes that will recur as short lessons, grouped as Commands, Conventions, Pitfalls, Review, Verification, and Process. `state.py learn` folds them into `.factory/learnings.md` with the run they came from, skips duplicates, and removes lessons a later retro retires. Every stage reads that file before it starts.
+
+Lessons come only from human feedback, CI results, and the code, never from comments by people without write access. Stages treat them as background: the spec and feedback still win. The file is local to your checkout and you can edit it freely. A lesson worth sharing with your team belongs in the repository; the retro proposes those changes, such as a `CLAUDE.md` rule or a missing doc, as one-line requests you can start as factory runs.
+
+### After merge: signals
+
+`<factory> signals` checks runs merged in the last 14 days for signs the change hurt:
+
+- a revert on the base branch, whether a `git revert` of the merge commit or GitHub's **Revert** button
+- failing checks on the merge commit
+- anything your own signal command prints
+
+The signal command can query an error tracker, logs, or a deploy dashboard. It receives the run as JSON on stdin, plus `FACTORY_RUN_ID` and `FACTORY_MERGE_SHA`; each line it prints is a signal:
+
+```sh
+git config factory.signals './scripts/errors-since-deploy.sh'
+```
+
+For each regression, the factory offers a follow-up run linked to the original (`--parent`), which starts at triage like any other. It never reverts anything itself. `state.py stats` counts regressions and follow-ups across runs.
+
+### Auto-approving small specs
+
+Checkpoint 1 can be skipped for low-risk work if the repo opts in. List the triage sizes and, optionally, the types (default `bug,chore`) that don't need spec approval:
+
+```sh
+git config factory.autoApproveSpec S
+git config factory.autoApproveTypes bug,chore
+```
+
+A spec is auto-approved only on its first round, when triage said `proceed`, and when the spec has acceptance criteria and no open questions. `state.py` checks this itself when the run moves from spec to implement, so the orchestrator can't skip the checkpoint otherwise. Ship approval is never skipped. `state.py stats` reports how many specs were auto-approved and how many were later sent back to spec at ship approval, which tells you whether the policy is too loose.
+
 ### Notifications
 
 Set a notify command to hear when a run needs you, or when its PR changes: spec approval, ship approval, a blocked stage, a PR opened or updated with fixes, and a PR merged or closed. The command runs through the shell with the event as JSON on stdin and `FACTORY_RUN_ID`, `FACTORY_STAGE`, and `FACTORY_MESSAGE` in its environment. Set it per repo or globally with `git config`, or with the `FACTORY_NOTIFY` environment variable, which takes precedence:
@@ -126,6 +163,6 @@ After **Ship** approval, the factory uses an applicable installed PR creation sk
 
 ## Testing and scope
 
-Run `python3 testing/test_state.py` for state helper tests. [`testing/README.md`](testing/README.md) describes harness-specific stub agents and exercised end-to-end paths.
+Run `python3 testing/test_state.py` for state helper tests and `python3 testing/test_evals.py` for the eval runner. [`testing/README.md`](testing/README.md) describes harness-specific stub agents and exercised end-to-end paths. [`testing/evals/`](testing/evals/README.md) runs the factory against fixed tickets on a sample repo and grades the results with hidden tests, so you can tell whether a prompt change helped.
 
-This version does not start runs from webhooks or cron, watch PRs on its own between sessions, or monitor production signals.
+This version does not start runs from webhooks or cron, or watch PRs and signals on its own between sessions; a human or a scheduled job runs `<factory> <run-id>` and `<factory> signals`.
