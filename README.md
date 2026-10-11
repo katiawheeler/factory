@@ -132,7 +132,7 @@ git config factory.autoApproveSpec S
 git config factory.autoApproveTypes bug,chore
 ```
 
-A spec is auto-approved only on its first round, when triage said `proceed`, and when the spec has acceptance criteria and no open questions. `state.py` checks this itself when the run moves from spec to implement, so the orchestrator can't skip the checkpoint otherwise. Ship approval is never skipped. `state.py stats` reports how many specs were auto-approved and how many were later sent back to spec at ship approval, which tells you whether the policy is too loose.
+A spec is auto-approved only on its first round, when triage said `proceed`, and when the spec has acceptance criteria and no open questions. An open question blocks auto-approval even when the spec proposes a default: someone should see the default before work starts. `state.py` checks this itself when the run moves from spec to implement, so the orchestrator can't skip the checkpoint otherwise. Ship approval is never skipped. `state.py stats` reports how many specs were auto-approved and how many were later sent back to spec at ship approval, which tells you whether the policy is too loose.
 
 ### Notifications
 

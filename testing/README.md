@@ -205,7 +205,7 @@ Running the land, GitHub-answer, retro, signals and auto-approval flows on `kati
 8. A land `wait` didn't mark comments read, so an old `/factory abort` resurfaced. `seen` now moves the cursor.
 9. Runs branched from a stale local base and missed a test already on `origin/main`. `new` now refuses a base that is behind its upstream.
 
-One observation, not changed: the spec stage nearly always lists open questions with defaults, so auto-approval, which requires none, rarely fires. Loosening it (for example, allowing open questions that have defaults) is a policy decision.
+The spec stage nearly always lists open questions with defaults, so auto-approval, which requires none, rarely fires. That is deliberate: an open question blocks auto-approval even when it has a default.
 
 ## Known limitations
 
