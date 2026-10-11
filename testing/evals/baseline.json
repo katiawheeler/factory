@@ -1,0 +1,174 @@
+{
+  "at": "20261011T043335Z",
+  "agent": "claude -p {prompt} --allowedTools \"Bash Read Write Edit Glob Grep Agent\"",
+  "results": [
+    {
+      "id": "word-count-whitespace",
+      "run": "20261011-word-count-whitespace",
+      "error": null,
+      "passed": true,
+      "checks": {
+        "triage": {
+          "ok": true,
+          "got": "proceed",
+          "want": [
+            "proceed"
+          ]
+        },
+        "stage": {
+          "ok": true,
+          "got": "checkpoint-2",
+          "want": "checkpoint-2"
+        },
+        "verification": {
+          "ok": true,
+          "got": "pass",
+          "want": "pass"
+        },
+        "hidden_test": {
+          "ok": true,
+          "got": "OK"
+        },
+        "files": {
+          "ok": true,
+          "got": [
+            "tests/test_core.py",
+            "textstat/core.py"
+          ],
+          "stray": []
+        }
+      },
+      "metrics": {
+        "rounds": {
+          "implement": 1,
+          "land": 0,
+          "review": 1,
+          "spec": 1,
+          "verify": 1
+        },
+        "agent_seconds": 105,
+        "spec_revisions": 0,
+        "cap_hits": 0,
+        "tokens": 173713
+      }
+    },
+    {
+      "id": "json-output",
+      "run": "20261011-stats-json-flag",
+      "error": null,
+      "passed": true,
+      "checks": {
+        "triage": {
+          "ok": true,
+          "got": "proceed",
+          "want": [
+            "proceed"
+          ]
+        },
+        "stage": {
+          "ok": true,
+          "got": "checkpoint-2",
+          "want": "checkpoint-2"
+        },
+        "verification": {
+          "ok": true,
+          "got": "pass",
+          "want": "pass"
+        },
+        "hidden_test": {
+          "ok": true,
+          "got": "OK"
+        },
+        "files": {
+          "ok": true,
+          "got": [
+            "README.md",
+            "tests/test_cli.py",
+            "textstat/cli.py"
+          ],
+          "stray": []
+        }
+      },
+      "metrics": {
+        "rounds": {
+          "implement": 1,
+          "land": 0,
+          "review": 1,
+          "spec": 1,
+          "verify": 1
+        },
+        "agent_seconds": 114,
+        "spec_revisions": 0,
+        "cap_hits": 0,
+        "tokens": 174911
+      }
+    },
+    {
+      "id": "vague-request",
+      "run": "20261011-make-textstat-better",
+      "error": null,
+      "passed": true,
+      "checks": {
+        "triage": {
+          "ok": true,
+          "got": "needs-human",
+          "want": [
+            "needs-human"
+          ]
+        },
+        "stage": {
+          "ok": true,
+          "got": "checkpoint-1",
+          "want": "checkpoint-1"
+        }
+      },
+      "metrics": {
+        "rounds": {
+          "implement": 0,
+          "land": 0,
+          "review": 0,
+          "spec": 0,
+          "verify": 0
+        },
+        "agent_seconds": 21,
+        "spec_revisions": 0,
+        "cap_hits": 0,
+        "tokens": 30392
+      }
+    },
+    {
+      "id": "out-of-scope",
+      "run": "20261011-port-textstat-rust",
+      "error": null,
+      "passed": true,
+      "checks": {
+        "triage": {
+          "ok": true,
+          "got": "needs-human",
+          "want": [
+            "reject",
+            "needs-human"
+          ]
+        },
+        "stage": {
+          "ok": true,
+          "got": "checkpoint-1",
+          "want": "checkpoint-1"
+        }
+      },
+      "metrics": {
+        "rounds": {
+          "implement": 0,
+          "land": 0,
+          "review": 0,
+          "spec": 0,
+          "verify": 0
+        },
+        "agent_seconds": 25,
+        "spec_revisions": 0,
+        "cap_hits": 0,
+        "tokens": null
+      }
+    }
+  ]
+}
