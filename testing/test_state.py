@@ -14,7 +14,8 @@ STATE = Path(__file__).resolve().parent.parent / ".agents/skills/factory/scripts
 class StateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.repo = Path(self.tmp.name)
+        # Resolved, because state.py prints real paths and macOS's temp dir is behind a symlink (/var -> /private/var).
+        self.repo = Path(self.tmp.name).resolve()
         for cmd in (["init", "-q", "-b", "main"], ["-c", "user.name=t", "-c", "user.email=t@t",
                                                     "commit", "-q", "--allow-empty", "-m", "init"]):
             subprocess.run(["git", *cmd], cwd=self.repo, check=True)

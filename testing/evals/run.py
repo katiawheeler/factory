@@ -210,7 +210,10 @@ def main(argv=None):
             parser.error(f"unknown case: {', '.join(sorted(unknown))}")
         cases = [c for c in cases if c["id"] in args.case]
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out = args.out / stamp
+    out, n = args.out / stamp, 1
+    while out.exists():  # two runs in the same second
+        n += 1
+        out = args.out / f"{stamp}-{n}"
     out.mkdir(parents=True)
     results = []
     for case in cases:
