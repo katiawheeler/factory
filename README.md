@@ -14,16 +14,18 @@ Use your agent's syntax for invoking an installed skill. The factory can dispatc
 
 Agents write their outputs to `.factory/runs/<run-id>/`. Each run works in its own Git worktree, so your checkout stays on your branch with your uncommitted changes untouched. At the two approval points, the host presents those outputs to the human and saves the answer in `feedback.md` for the next stage. Review or verification failures return to implementation, then pass through review again. A human can steer when work is blocked. Shipping opens a PR and posts the run report on it. Landing then follows the PR: red CI, merge conflicts, and reviewers' comments go back through implement, review, and verify, and the fix is pushed to the same PR, until the PR is merged or closed.
 
-| Stage | Output | Human decision |
-|---|---|---|
-| Triage | `triage.md` with resolved input, risks, questions, and verdict | Clarify or override if needed |
-| Spec | `spec.md` with testable acceptance criteria, open questions, and diagrams where they help | Checkpoint 1: approve or request a revision; the human may edit `spec.md` directly |
-| Implement | Code commits and `implementation.md` | Steer if blocked |
-| Review | `review.md` with blocking findings and notes | Findings are shown at checkpoint 2 |
-| Verify | `verification.md` and `evidence/`, with a suite result and one result per criterion | Checkpoint 2: inspect evidence, ship, or send work back |
-| Ship | Pushed branch, PR, and a PR comment with the spec and evidence | Only after the human says **Ship** |
-| Land | `land.md`: the PR's state, CI failures, and review comments sorted into fixes, questions, and things not acted on | Reviewers review and merge; questions come to the human |
-| Retro | `retro.md`, folded into `.factory/learnings.md` | Proposed repo changes are offered as new runs |
+That is the default. A repo can opt in to skipping triage, spec, review, verify, and either approval point, up to running unattended from input to PR; see [Skipping stages for automation](#skipping-stages-for-automation). Implement, ship, and land always run.
+
+| Stage | Output | Human decision | Skippable with `factory.skip` |
+|---|---|---|---|
+| Triage | `triage.md` with resolved input, risks, questions, and verdict | Clarify or override if needed | `triage` |
+| Spec | `spec.md` with testable acceptance criteria, open questions, and diagrams where they help | Checkpoint 1: approve or request a revision; the human may edit `spec.md` directly | `spec` (skips checkpoint 1 too), or just `checkpoint-1` |
+| Implement | Code commits and `implementation.md` | Steer if blocked | Never |
+| Review | `review.md` with blocking findings and notes | Findings are shown at checkpoint 2 | `review` |
+| Verify | `verification.md` and `evidence/`, with a suite result and one result per criterion | Checkpoint 2: inspect evidence, ship, or send work back | `verify`, and `checkpoint-2` for the approval |
+| Ship | Pushed branch, PR, and a PR comment with the spec and evidence | Only after the human says **Ship**, unless `checkpoint-2` is skipped | Never |
+| Land | `land.md`: the PR's state, CI failures, and review comments sorted into fixes, questions, and things not acted on | Reviewers review and merge; questions come to the human | Never |
+| Retro | `retro.md`, folded into `.factory/learnings.md` | Proposed repo changes are offered as new runs | Never |
 
 Review gets three consecutive attempts; verification gets three attempts between human checkpoints; PR fix rounds get three between human checkpoints. A cap sends the run to checkpoint 2 with the problem stated. Failed verification returns to implementation, then review, then verification. An environment limitation can go straight to checkpoint 2 with the affected criteria named.
 
@@ -125,7 +127,7 @@ For each regression, the factory offers a follow-up run linked to the original (
 
 ### Auto-approving small specs
 
-Checkpoint 1 can be skipped for low-risk work if the repo opts in. List the triage sizes and, optionally, the types (default `bug,chore`) that don't need spec approval:
+Checkpoint 1 can be skipped for low-risk work if the repo opts in. (To skip it for every run, use [`factory.skip`](#skipping-stages-for-automation) instead.) List the triage sizes and, optionally, the types (default `bug,chore`) that don't need spec approval:
 
 ```sh
 git config factory.autoApproveSpec S
@@ -136,17 +138,41 @@ A spec is auto-approved only on its first round, when triage said `proceed`, and
 
 ### Skipping stages for automation
 
-By default every run takes the whole loop, and `state.py` refuses any other move: a run can't jump from triage to implement, or from implement to ship. To automate the factory, list the stages your repo is willing to skip:
+By default every run takes the whole loop, and `state.py` enforces it: `advance` refuses any move the loop doesn't make, so a run can't jump from triage to implement or from implement to ship, whatever the orchestrator does. To automate the factory, list the stages your repo is willing to skip:
 
 ```sh
-git config factory.skip review,verify      # skip review and verification
-git config factory.skip checkpoint-1,checkpoint-2   # no human approvals: input to PR unattended
-git config factory.skip all                # triage, spec, checkpoint-1, review, verify, checkpoint-2
+git config factory.skip <stage>,<stage>,...   # or: all
+git config --unset factory.skip               # back to the full loop
 ```
 
-`FACTORY_SKIP` overrides it for one session, for example in a CI job. Implement, ship, and land are never skipped: every run still ends in a PR, and the factory still never merges it. Skipping the spec skips its approval too, and implement, review, and verify then work from the input itself. A run that skips verify only gets to ship when review approved, and one that skips checkpoint 2 only when its verification passed. Escalations still stop for a human, even at a checkpoint you skip: triage questions or a rejection, a loop cap, an unverifiable criterion, and a blocked stage.
+| Name | What the run does instead |
+|---|---|
+| `triage` | Goes straight to the spec (or the next stage not skipped). The spec stage resolves the input itself: it fetches a linked ticket or URL and finds the relevant code. |
+| `spec` | Writes no spec and goes straight to implement. Skips `checkpoint-1` too, since there's nothing to approve. Implement, review, verify, and land treat the input as the contract, and verification checks the test suite with no acceptance criteria. |
+| `checkpoint-1` | Writes the spec but doesn't wait for approval. Use this rather than [`factory.autoApproveSpec`](#auto-approving-small-specs) to skip spec approval for every run, not just small ones. |
+| `review` | Goes from implement straight to verify. |
+| `verify` | Goes from review straight to ship approval. Runs no checks and gathers no evidence of its own; CI on the PR is then the only test run. |
+| `checkpoint-2` | Opens the PR without waiting for **Ship**, but only if the last check that ran passed: a valid `pass` verification, or review's `approve` when verify is skipped too. Otherwise the run stops for a human. |
+| `all` | All six above. |
 
-Each skip is recorded in the run's history. The PR report and PR updates list the stages skipped, say when no human approved the spec or the ship decision, and say when verification was skipped. `state.py stats` counts runs that skipped stages and runs that shipped without ship approval.
+Common setups:
+
+```sh
+git config factory.skip checkpoint-1,checkpoint-2   # full loop, no human approvals: input to PR unattended
+git config factory.skip checkpoint-1                # humans only decide what ships
+git config factory.skip triage,review               # faster runs that still stop for both approvals
+git config factory.skip all                         # implement, then open the PR
+```
+
+Set it per repository, globally with `git config --global`, or for one session with the `FACTORY_SKIP` environment variable, which takes precedence. That suits a CI job or a scheduled run: `FACTORY_SKIP=checkpoint-1,checkpoint-2 claude -p "/factory <ticket>"`. An unknown name fails the run's next `advance` with the list of valid names, and `python3 <skill>/scripts/state.py skips` prints the stages the current setting skips.
+
+What skipping never changes:
+
+- **Implement, ship, and land always run.** Every run ends in a PR, and the factory still never merges or deploys; merging stays a human's call.
+- **Escalations still stop for a human**, even at a checkpoint you skip: triage questions or a rejection, a loop cap, an unverifiable criterion, and any blocked stage.
+- **PR fix rounds** go through implement and whichever of review and verify aren't skipped, then push to the same PR, as usual.
+
+Skipping is visible. Each skip is recorded in the run's history. The PR report and PR updates list the stages skipped, say when no human approved the spec or the ship decision, and say when verification was skipped, so reviewers know what nobody checked. `state.py approval <run-id>` prints the same, and `state.py stats` counts runs that skipped stages and runs that shipped without ship approval.
 
 ### Notifications
 
@@ -163,6 +189,20 @@ git config --global factory.notify 'osascript -e "display notification \"$FACTOR
 
 A failing or slow notify command (30-second limit) prints a warning and never blocks the run. `<factory>` with no arguments lists runs and how long each has been waiting on a human.
 
+## Settings
+
+Every setting is optional and off by default. Set each one per repository with `git config`, or for all your repositories with `git config --global`. The environment variable, where there is one, overrides both for one session.
+
+| Setting | Environment variable | What it does |
+|---|---|---|
+| `factory.skip` | `FACTORY_SKIP` | Stages runs skip: any of `triage`, `spec`, `checkpoint-1`, `review`, `verify`, `checkpoint-2`, or `all`. See [Skipping stages for automation](#skipping-stages-for-automation). |
+| `factory.autoApproveSpec` | `FACTORY_AUTO_APPROVE_SPEC` | Triage sizes (e.g. `S`) whose specs skip checkpoint 1 when they have no open questions. See [Auto-approving small specs](#auto-approving-small-specs). |
+| `factory.autoApproveTypes` | `FACTORY_AUTO_APPROVE_TYPES` | Triage types that auto-approval applies to. Default `bug,chore`. |
+| `factory.approvers` | `FACTORY_APPROVERS` | GitHub logins whose `/factory` comments count as answers. Default: anyone with write access. See [Answering from GitHub](#answering-from-github). |
+| `factory.postCheckpoints` | `FACTORY_POST_CHECKPOINTS` | `true` posts checkpoints on the source issue before a PR exists. |
+| `factory.signals` | `FACTORY_SIGNALS` | A command whose output lines are regressions for merged runs. See [After merge: signals](#after-merge-signals). |
+| `factory.notify` | `FACTORY_NOTIFY` | A command run when a run needs you or its PR changes. See [Notifications](#notifications). |
+
 ## Install
 
 Install with a skills manager that supports your agent, for example:
@@ -173,10 +213,10 @@ npx skills add katiawheeler/factory
 
 For a manual install, copy the full [source skill directory](.agents/skills/factory/SKILL.md) into your agent's skill directory and invoke it using that agent's convention. Copy the directory rather than a compatibility symlink. A repo can override a stage with a named `factory-<stage>` agent.
 
-After **Ship** approval, the factory uses an applicable installed PR creation skill by default to open the PR. If none is available, it uses GitHub tooling directly. On resume it checks for an existing PR before creating one, then records the PR URL in the run state.
+After **Ship** approval (or after verify, when `checkpoint-2` is skipped), the factory uses an applicable installed PR creation skill by default to open the PR. If none is available, it uses GitHub tooling directly. On resume it checks for an existing PR before creating one, then records the PR URL in the run state.
 
 ## Testing and scope
 
 Run `python3 testing/test_state.py` for state helper tests and `python3 testing/test_evals.py` for the eval runner. [`testing/README.md`](testing/README.md) describes harness-specific stub agents and exercised end-to-end paths. [`testing/evals/`](testing/evals/README.md) runs the factory against fixed tickets on a sample repo and grades the results with hidden tests, so you can tell whether a prompt change helped.
 
-This version does not start runs from webhooks or cron, or watch PRs and signals on its own between sessions; a human or a scheduled job runs `<factory> <run-id>` and `<factory> signals`.
+This version does not start runs from webhooks or cron, or watch PRs and signals on its own between sessions; a human or a scheduled job runs `<factory> <run-id>` and `<factory> signals`. With `factory.skip` set, such a job can take a run from input to PR without anyone answering a checkpoint.
