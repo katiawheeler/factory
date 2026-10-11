@@ -431,12 +431,13 @@ else:
         folder = self.finished_run("closed")
         (folder / "retro.md").write_text("## Learnings\n- [Commands] run tests with `make test`\n"
                                          "- [Retire] The API client caches tokens per process\n"
-                                         "- [Review] Reviewers want a changelog entry.\n")
+                                         "- [Review] Reviewers want a changelog entry. _(copied-id)_\n")
         self.assertIn("added 1, retired 1, skipped 1 duplicates; 3 learnings", self.run_state("learn", self.id).stdout)
         text = (self.repo / ".factory/learnings.md").read_text()
         self.assertNotIn("caches tokens", text)
         self.assertNotIn("## Pitfalls", text)
         self.assertIn(f"`make test`. _({first})_", text)
+        self.assertIn(f"- Reviewers want a changelog entry. _({self.id})_\n", text)
 
     def test_signals_find_reverts_and_custom_signals(self):
         remote = self.repo.parent / f"{self.repo.name}-remote.git"

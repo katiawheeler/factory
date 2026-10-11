@@ -912,7 +912,7 @@ def learnings_path():
 
 
 def normalize(lesson):
-    lesson = re.sub(r"\s*_\([^)]*\)_\s*$", "", lesson)  # drop the provenance suffix
+    lesson = re.sub(r"(\s*_\([^)]*\)_)+\s*$", "", lesson)  # drop the provenance suffix
     return re.sub(r"\s+", " ", lesson).strip().rstrip(".").lower()
 
 
@@ -954,6 +954,7 @@ def cmd_learn(run_id):
             duplicates += 1
             continue
         known.add(normalize(lesson))
+        lesson = re.sub(r"(\s*_\([^)]*\)_)+\s*$", "", lesson)  # a retro may copy the suffix; add it once
         cats.setdefault(name, []).append(f"{lesson} _({s['id']})_")
         added += 1
     order = [c for c in LEARNING_CATEGORIES if cats.get(c)] + [c for c in cats if c not in LEARNING_CATEGORIES and cats[c]]
