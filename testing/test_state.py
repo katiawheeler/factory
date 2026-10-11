@@ -240,6 +240,18 @@ class StateTest(unittest.TestCase):
         (folder / "verification.md").write_text("Verdict: pass\nSuite: fail\n")
         self.run_state("check-verification", self.id, ok=False)
 
+    def test_concurrent_writes_to_one_run_are_not_lost(self):
+        procs = [subprocess.Popen(["python3", str(STATE), "usage", self.id, "implement", str(n)], cwd=self.repo,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) for n in range(1, 21)]
+        procs += [subprocess.Popen(["python3", str(STATE), "set", self.id, "input_summary", "x"], cwd=self.repo,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)]
+        for proc in procs:
+            _, err = proc.communicate()
+            self.assertEqual(proc.returncode, 0, err)
+        s = self.state()
+        self.assertEqual(sorted(u["tokens"] for u in s["usage"]), list(range(1, 21)))
+        self.assertEqual(s["input_summary"], "x")
+
     def test_done_requires_pr_url(self):
         self.advance("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship")
         self.assertIn("recorded PR URL", self.run_state("advance", self.id, "done", ok=False).stderr)

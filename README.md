@@ -50,7 +50,7 @@ Replace `<factory>` with your agent's invocation syntax:
 
 In an interactive session, the factory uses the host's question UI when available. Otherwise it asks in chat and waits for a reply. It never treats a preselected choice as an answer. Headless runs can pass answers as command arguments and resume from the recorded stage, or take them from GitHub comments; see [Answering from GitHub](#answering-from-github).
 
-`state.json` and its transitions are managed by [`state.py`](.agents/skills/factory/scripts/state.py), which requires Python 3. If shipping cannot push or open a PR, the run remains blocked for human steering and doesn't move on to land.
+`state.json` and its transitions are managed by [`state.py`](.agents/skills/factory/scripts/state.py), which requires Python 3. It locks a run while changing it, so a scheduled resume, a GitHub answer, and a PR event arriving at once don't overwrite each other's changes (on Windows, which lacks the lock, keep one session per run). If shipping cannot push or open a PR, the run remains blocked for human steering and doesn't move on to land.
 
 ### Worktrees
 

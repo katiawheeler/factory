@@ -3,7 +3,8 @@
 
 All run state lives in <repo>/.factory/runs/<run-id>/. This script is the only
 thing that writes state.json, so stage names and terminal completion are
-checked and every transition is logged the same way.
+checked and every transition is logged the same way. Each write holds the run's
+lock (<run>/.lock), so parallel sessions on one run don't lose each other's changes.
 
 Usage:
   state.py new <slug> <input-file|-> [--in-place] [--parent <run-id>] [--skip <stages>]
@@ -58,7 +59,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows: no advisory locks, so concurrent writers aren't serialized there
+    fcntl = None
 
 STAGES = [
     "triage", "spec", "checkpoint-1", "implement", "review", "verify",
@@ -146,6 +153,27 @@ def load(run_id):
     if not path.exists():
         die(f"no run '{run_id}' (looked for {path})")
     return path, json.loads(path.read_text())
+
+
+@contextmanager
+def locked(lock_file):
+    """Hold an exclusive lock on lock_file, so read-modify-write cycles from parallel sessions don't interleave."""
+    if fcntl is None or not lock_file.parent.is_dir():
+        yield
+        return
+    with lock_file.open("a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def run_lock(run_id):
+    """The lock for one run's state.json and feedback.md. Taken before load() by every command that writes them."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_id):
+        die(f"invalid run id '{run_id}'")
+    return locked(runs_dir() / run_id / ".lock")
 
 
 def save(path, state):
@@ -1147,6 +1175,11 @@ def read_learnings(path):
 
 def cmd_learn(run_id):
     """Fold a finished run's retro into the shared learnings file, so later runs start from it."""
+    with locked(learnings_path().with_suffix(".lock")):
+        learn(run_id)
+
+
+def learn(run_id):
     path, s = load(run_id)
     if s["stage"] not in TERMINAL:
         die(f"run is at '{s['stage']}'; learn from a merged, closed, done or aborted run")
@@ -1248,7 +1281,13 @@ def run_signals(path, s):
               "reverted_by": reverted_by, "base_ci": ci, "failing": failing, "custom": custom,
               "regression": bool(reverted_by or ci == "fail" or custom), "notes": notes}
     s["signals"] = result
-    save(path, s)
+    # The checks above can take a while; merge into the current state rather than overwrite it.
+    with run_lock(s["id"]):
+        current = json.loads(path.read_text())
+        current["signals"] = result
+        if s.get("merge_sha"):
+            current["merge_sha"] = s["merge_sha"]
+        save(path, current)
     return result
 
 
@@ -1465,6 +1504,17 @@ def main(argv):
                   file=sys.stderr)
         return
     fn, nargs = COMMANDS[name]
+    if name in WRITERS and args:
+        with run_lock(args[0]):
+            return dispatch(name, fn, nargs, args)
+    return dispatch(name, fn, nargs, args)
+
+
+# Commands that change a run's state.json or feedback.md; each holds the run's lock while it runs.
+WRITERS = {"advance", "set", "feedback", "seen", "usage", "learn"}
+
+
+def dispatch(name, fn, nargs, args):
     if name == "new":
         if len(args) < 2:
             die("usage: new <slug> <input-file|-> [--in-place] [--parent <run-id>] [--skip <stages>]")
