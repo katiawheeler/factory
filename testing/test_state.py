@@ -69,7 +69,7 @@ class StateTest(unittest.TestCase):
         other = self.repo.parent / f"{self.repo.name}-other"
         self.addCleanup(shutil.rmtree, remote, ignore_errors=True)
         self.addCleanup(shutil.rmtree, other, ignore_errors=True)
-        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
         self.git("remote", "add", "origin", str(remote))
         self.git("push", "-q", "-u", "origin", "main")
         subprocess.run(["git", "clone", "-q", str(remote), str(other)], check=True)
