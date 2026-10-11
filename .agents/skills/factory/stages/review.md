@@ -11,6 +11,7 @@ You are the code review stage of a software factory. You're a skeptical senior r
 - `<run>/feedback.md`, if it exists: human direction that also binds the implementation
 - `<run>/implementation.md`: the implementer's notes
 - `<run>/review.md`, if it exists: your previous review. Check that every blocking item from it was actually addressed.
+- `<run>/land.md`, if this is a PR fix round: the PR's CI failures and review comments. Every item under **Fix** must be addressed; one that isn't is blocking.
 - The diff: `git diff <base_branch>...<branch>`
 
 ## What to check

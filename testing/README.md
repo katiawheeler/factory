@@ -6,7 +6,7 @@
 python3 testing/test_state.py
 ```
 
-These cover run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report (one screenshot and one recording per criterion, media attached with a gh that supports `--attach`, listed by name without one, oversized files skipped) and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
+These cover the land stage (shipping only after checkpoint 2 or for a PR fix round, PR fix rounds and their cap, merged and closed, land notifications), `pr-status` check summaries, `inbox` trust rules (write access, `factory.approvers`, bots, the factory's own posts, comments from before the cursor), `checkpoint-post` on an issue (opt-in) and on a PR, `pr-update`, the `usage` and `stats` ledger, run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report (one screenshot and one recording per criterion, media attached with a gh that supports `--attach`, listed by name without one, oversized files skipped) and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
 
 ## Forcing loop caps and blocked stages with Claude Code stub agents
 
@@ -23,6 +23,7 @@ Real agents rarely loop to a cap, because they escalate first. To test the orche
    REVIEW=changes-requested  # approve | changes-requested
    VERIFY=fail               # pass | fail | unverifiable
    IMPLEMENT=done            # done | blocked
+LAND=wait                 # merged | closed | fix | wait | needs-human | abort
    ```
    Edit it between calls to steer what happens next.
 3. Drive the run headlessly, e.g. `claude -p "/factory <run-id> approve" --allowedTools "Bash Read Write Edit Glob Grep Agent"`, and check `.factory/runs/<id>/state.json` history.
@@ -83,9 +84,35 @@ The standalone recipe has been checked by hand: a script with `test.use({ video:
 6. **(UI) Browser mismatch.** In an environment whose preinstalled browser doesn't match the latest `@playwright/test`, expect verify to set `PW_CHROMIUM` or install the matching browser, not to mark the criterion `unverifiable`.
 7. **No browser.** In an environment with no usable browser and no downloads, expect the UI criteria to be `unverifiable` with the exact launch error, never `verified`.
 
+### Landing the PR
+
+Use a sample repo with CI on pull requests, and a second GitHub account (or a teammate) with write access to review.
+
+1. **Wait, then merge.** Ship a run and resume it with `/factory <id>` while CI is pending. Expect `land.md` with `Verdict: wait` naming the pending checks, the run still at `land`, and `/factory` listing it as `PR open for review`. Merge the PR by hand, resume, and expect `merged`, the worktree removed, the branch kept, and `stats <id>` printed.
+2. **Red CI.** Ship a change that breaks a CI check the local fast checks don't run. Expect land to read the failing log, a `fix` item naming the check, implement → review → verify, a plain `git push` (no force) to the same PR, a `pr-update` comment, and the run back at `land`.
+3. **Review comment.** As the reviewer, leave an inline comment asking for a rename, and request changes. Expect a fix round that addresses it, a one-line reply on the thread ending in the hidden marker, and no thread resolved by the factory.
+4. **Untrusted and bot comments.** From an account without write access, comment `/factory abort` and a change request. Have a bot (or a `[bot]` account) leave a finding that doesn't hold. Expect none of them acted on, and all three listed under **Not acted on**.
+5. **Merge conflict.** Push a conflicting change to the base branch. Expect a fix round that merges the base in, with no rebase or force-push.
+6. **Design question.** As the reviewer, ask "should this be a setting instead?". Expect `needs-human`, the run at `blocked` with that question, and a notification.
+7. **Cap.** With stubs (`LAND=fix`), expect three PR fix rounds, then checkpoint 2 with "PR feedback did not converge".
+8. **Closed.** Close the PR unmerged. Expect `closed` and the worktree removed.
+
+### Answering from GitHub
+
+1. **Approve on the issue.** With `git config factory.postCheckpoints true`, start a run from an issue URL. Expect `thread_url` set from triage's `Source:` line, and the full spec posted on the issue at checkpoint 1. Comment `/factory approve` there, run `/factory <id>`, and expect the approval logged with your login and the comment URL, then implement.
+2. **Opt-in.** Without `factory.postCheckpoints`, expect no comment on the issue, while a `/factory approve` there is still read on resume.
+3. **Ship on the PR.** Drive a run to checkpoint 2 after a PR fix cap (the PR exists). Expect the checkpoint posted on the PR, and `/factory ship` there to push the round.
+4. **Untrusted answer.** From an account without write access, comment `/factory approve`. Expect it ignored, and the orchestrator naming who was ignored.
+5. **Allowlist.** Set `factory.approvers` to one login. Expect only that person's answers to count, even from other people with write access.
+
+### Run ledger
+
+1. **Usage recorded.** Run a full loop in Claude Code. Expect `usage` entries in `state.json` for each dispatched stage, and `stats <id>` to show tokens and time per stage.
+2. **Across runs.** With several finished runs, expect `stats` to show outcomes, merge rate, first-time approval rates, caps hit, and median times that match the runs' histories.
+
 ### Notifications
 
-1. **Every human stop notifies once.** `git config factory.notify 'cat >> /tmp/factory-notify.log; echo >> /tmp/factory-notify.log'`, then run a request vague enough for triage to return `needs-human`, all the way to ship. Expect one JSON line each for `checkpoint-1` (triage questions), `checkpoint-1` (spec), `checkpoint-2`, and `done` with `pr_url`, and none for work stages.
+1. **Every human stop notifies once.** `git config factory.notify 'cat >> /tmp/factory-notify.log; echo >> /tmp/factory-notify.log'`, then run a request vague enough for triage to return `needs-human`, all the way to ship. Expect one JSON line each for `checkpoint-1` (triage questions), `checkpoint-1` (spec), `checkpoint-2`, `land` with `pr_url` ("PR opened"), and `merged` once you merge, and none for work stages.
 2. **Blocked.** Use the implement stub with `IMPLEMENT=blocked`. Expect a `blocked` event whose `note` is the agent's question.
 3. **A real channel.** Set the ntfy or Slack example from the main README. Expect a message on your phone or channel at each stop, saying which run, which checkpoint, and the one-line summary.
 4. **Environment variable wins.** With `factory.notify` set, run headlessly with `FACTORY_NOTIFY` set to a different command. Expect only the environment command to run.
@@ -123,11 +150,14 @@ The standalone recipe has been checked by hand: a script with `test.use({ video:
 | Notifications: each human stop, blocked, a real channel, environment override, failing command, waiting time (notification flows 1–6) | not yet run | ⏳ |
 | Standalone Playwright recipe: screenshots via `EVIDENCE`, video per test, trace on failure, `PW_CHROMIUM` for a mismatched browser | by hand, static page, `@playwright/test` 1.63 | ✅ |
 | Playwright in verify with real agents: standalone and repo-configured, failing flow, faked states, second round, browser mismatch, no browser (Playwright flows 1–7) | not yet run | ⏳ |
+| Land: wait, merge, red CI, review comment, untrusted and bot comments, conflict, design question, cap, closed (land flows 1–8) | not yet run | ⏳ |
+| Answering from GitHub: issue approval, opt-in, ship on the PR, untrusted answer, allowlist (flows 1–5) | not yet run | ⏳ |
+| Run ledger: usage recorded, stats across runs (flows 1–2) | not yet run | ⏳ |
 
 Codex GUI question routing and selection of a dedicated PR creation skill are documented behavior; they have not yet been exercised in an end-to-end factory run.
 
 ## Known limitations
 
 - **In-place runs share the checkout.** A run created with `--in-place` switches the checkout to its branch, so only one can be active there at a time. Default runs each get a worktree and don't have this limit.
-- **Untested end to end:** worktree-per-run, posting the PR report, Playwright in verify, and notifications are covered by the unit tests above, but have not yet been exercised in a full factory run with real agents. See [End-to-end flows for worktrees, the PR report, Playwright, and notifications](#end-to-end-flows-for-worktrees-the-pr-report-playwright-and-notifications).
+- **Untested end to end:** worktree-per-run, posting the PR report, Playwright in verify, notifications, landing, answering from GitHub, and the ledger are covered by the unit tests above, but have not yet been exercised in a full factory run with real agents. See [End-to-end flows for worktrees, the PR report, Playwright, and notifications](#end-to-end-flows-for-worktrees-the-pr-report-playwright-and-notifications).
 - **Long headless runs** can outlive a wrapping tool's timeout. Run them in the background and wait on the PID.

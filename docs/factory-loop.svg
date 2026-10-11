@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 760" role="img" aria-labelledby="title description">
   <title id="title">The factory loop</title>
-  <desc id="description">A ticket, URL, or prompt enters a loop that runs Triage, Spec, Implement, Review, Verify, and Ship, then opens a PR. A human approves the spec before implementation and decides to ship after verification. Failed review or verification sends work back to Implement.</desc>
+  <desc id="description">A ticket, URL, or prompt enters a loop that runs Triage, Spec, Implement, Review, Verify, Ship, and Land. Ship opens a PR and Land follows it until it merges or closes. A human approves the spec before implementation and decides to ship after verification. Failed review or verification, and CI failures or review comments on the PR, send work back to Implement.</desc>
   <defs>
     <marker id="arrow" markerWidth="14" markerHeight="14" refX="9" refY="7" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M2 1 L10 7 L2 13" fill="none" stroke="#463a14" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -53,7 +53,8 @@
   <text x="800" y="692" class="stage" text-anchor="middle">Review</text>
   <text x="562" y="596" class="stage" text-anchor="end">Verify</text>
   <text x="537" y="304" class="stage" text-anchor="end">Ship</text>
-  <text x="680" y="196" class="muted" text-anchor="end">opens a PR</text>
+  <text x="676" y="196" class="stage" text-anchor="end">Land</text>
+  <text x="676" y="150" class="muted" text-anchor="end">follows the PR to merge</text>
 
   <!-- checkpoint 1: spec approval -->
   <circle cx="1006.8" cy="383.5" r="8" class="dot"/>

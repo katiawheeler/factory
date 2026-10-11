@@ -1,6 +1,7 @@
 """Unit tests for the /factory state helper. Run: python3 testing/test_state.py"""
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -112,6 +113,246 @@ class StateTest(unittest.TestCase):
         self.run_state("set", self.id, "pr_url", "https://example.test/pr/1")
         self.advance("done")
 
+    def ship(self, pr="https://github.com/o/r/pull/7"):
+        self.advance("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship")
+        self.run_state("set", self.id, "pr_url", pr)
+        self.advance("land")
+
+    def test_ship_needs_ship_approval_unless_fixing_an_open_pr(self):
+        self.advance("spec", "checkpoint-1", "implement", "review", "verify")
+        self.assertIn("after checkpoint-2", self.run_state("advance", self.id, "ship", ok=False).stderr)
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        self.advance("ship")
+
+    def test_land_requires_ship_and_pr_url(self):
+        self.advance("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship")
+        self.assertIn("recorded PR URL", self.run_state("advance", self.id, "land", ok=False).stderr)
+        self.assertIn("recorded PR URL", self.run_state("advance", self.id, "merged", ok=False).stderr)
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        self.advance("land")
+        self.assertIn("PR open for review", self.run_state("list").stdout)
+
+    def test_pr_fix_rounds_loop_back_through_review_and_verify_to_ship(self):
+        self.ship()
+        out = self.advance("implement", "review", "verify", "ship", "land")
+        self.assertEqual(out[0], "implement round 2 (PR fix 1 of 3)")
+        self.assertEqual((self.state()["rounds"]["land"], self.state()["loop"]["land"]), (1, 1))
+        self.advance("implement", "review", "verify", "ship", "land")
+        out = self.advance("implement")
+        self.assertIn("PR fix 3 of 3", out[0])
+        self.assertIn("LAST ATTEMPT", out[0])
+        self.advance("review", "verify", "checkpoint-2")
+        self.assertEqual(self.state()["loop"]["land"], 0)
+        self.assertEqual(self.state()["rounds"]["land"], 3)
+
+    def test_merged_and_closed_end_the_run_and_release_the_worktree(self):
+        self.ship()
+        self.assertIn("merged, closed, done or aborted", self.run_state("release", self.id, ok=False).stderr)
+        self.advance("merged")
+        self.run_state("advance", self.id, "implement", ok=False)
+        self.run_state("release", self.id)
+        self.assertFalse((self.repo / ".factory/worktrees" / self.id).exists())
+        other = self.run_state("new", "b", "-", input="x").stdout.split()[0]
+        self.id = other
+        self.ship()
+        self.advance("implement", "closed")
+        self.assertEqual(self.state()["stage"], "closed")
+
+    def test_notify_on_land_and_merge(self):
+        log = self.repo.parent / f"{self.repo.name}-notify-land.log"
+        env = {"FACTORY_NOTIFY": f'cat >> "{log}"; echo >> "{log}"'}
+        self.advance("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship")
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        for stage in ("land", "implement", "review", "verify", "ship", "land", "merged"):
+            self.run_state("advance", self.id, stage, env=env)
+        events = [json.loads(line) for line in log.read_text().splitlines()]
+        log.unlink()
+        self.assertEqual([e["stage"] for e in events], ["land", "land", "merged"])
+        self.assertEqual([e["message"].split(": ", 1)[1] for e in events],
+                         ["PR opened https://github.com/o/r/pull/7", "pushed PR fixes to https://github.com/o/r/pull/7",
+                          "PR merged https://github.com/o/r/pull/7"])
+
+    def github(self, data):
+        """A gh on PATH that answers REST `api` calls from `data`, keyed by endpoint path."""
+        bin_dir = self.repo.parent / f"{self.repo.name}-gh"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "data.json").write_text(json.dumps(data))
+        gh = bin_dir / "gh"
+        gh.write_text(f"""#!/usr/bin/env python3
+import json, sys
+data = json.load(open({str(bin_dir / "data.json")!r}))
+args = sys.argv[1:]
+path = next(a for a in args[1:] if a.startswith("repos/")).split("?")[0]
+jq = args[args.index("--jq") + 1] if "--jq" in args else None
+if path.endswith("/permission"):
+    login = path.split("/")[-2]
+    if login in data.get("perms", {{}}):
+        print(data["perms"][login])
+        sys.exit(0)
+    print("gh: Forbidden (HTTP 403)" if data.get("perms_blocked") else "gh: Not Found (HTTP 404)", file=sys.stderr)
+    sys.exit(1)
+if path in data.get("forbidden", []):
+    print("gh: Resource not accessible by integration (HTTP 403)", file=sys.stderr)
+    sys.exit(1)
+value = data.get(path)
+if jq is None:
+    print(json.dumps(value))
+else:
+    key = jq.strip(".[]")
+    for item in (value or {{}}).get(key, []) if key else value or []:
+        print(json.dumps(item))
+""")
+        gh.chmod(0o755)
+        self.addCleanup(shutil.rmtree, bin_dir, ignore_errors=True)
+        return {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    def test_pr_status_summarizes_checks(self):
+        self.ship()
+        reviewer = lambda login, state: {"user": {"login": login}, "state": state}
+        data = {"repos/o/r/pulls/7": {"state": "open", "merged": False, "draft": False, "mergeable": None,
+                                      "mergeable_state": "dirty", "head": {"sha": "abc"}},
+                "repos/o/r/commits/abc/check-runs": {"check_runs": [
+                    {"name": "lint", "status": "completed", "conclusion": "success"},
+                    {"name": "test", "status": "completed", "conclusion": "failure", "details_url": "u"},
+                    {"name": "e2e", "status": "in_progress", "conclusion": None}]},
+                "repos/o/r/commits/abc/status": {"statuses": [{"context": "deploy", "state": "pending"}]},
+                "repos/o/r/pulls/7/reviews": [reviewer("a", "CHANGES_REQUESTED"), reviewer("b", "APPROVED"),
+                                              reviewer("a", "COMMENTED"), reviewer("a", "APPROVED")]}
+        st = json.loads(self.run_state("pr-status", self.id, env=self.github(data)).stdout)
+        self.assertEqual((st["state"], st["ci"], st["failing"], st["pending"]),
+                         ("OPEN", "fail", [{"name": "test", "url": "u"}], ["e2e", "deploy"]))
+        self.assertEqual((st["mergeable"], st["review_decision"], st["head"]), ("CONFLICTING", "APPROVED", "abc"))
+        self.assertNotIn("note", st)
+        data["repos/o/r/pulls/7"].update(state="closed", merged=True, mergeable=True, mergeable_state="clean")
+        data["repos/o/r/commits/abc/check-runs"] = {"check_runs": []}
+        data["forbidden"] = ["repos/o/r/commits/abc/status"]
+        st = json.loads(self.run_state("pr-status", self.id, env=self.github(data)).stdout)
+        self.assertEqual((st["state"], st["ci"], st["mergeable"]), ("MERGED", "none", "MERGEABLE"))
+        self.assertIn("commit statuses could not be read", st["note"])
+
+    def comment(self, login, body, at, kind="User", **extra):
+        return {"user": {"login": login, "type": kind}, "body": body, "created_at": at,
+                "html_url": f"https://github.com/o/r/c/{login}-{at}", **extra}
+
+    def test_inbox_reads_answers_from_people_with_write_access(self):
+        self.advance("spec", "checkpoint-1")
+        self.run_state("set", self.id, "thread_url", "https://github.com/o/r/issues/3")
+        late = "2999-01-01T00:00:00Z"
+        env = self.github({"perms": {"owner": "admin", "reader": "read"}, "repos/o/r/issues/3/comments": [
+            self.comment("owner", "/factory approve", "2000-01-01T00:00:00Z"),  # before the checkpoint
+            self.comment("owner", "<!-- factory-checkpoint: x -->\n/factory approve", late),
+            self.comment("reader", "/factory ship it", late),
+            self.comment("stranger", "/factory approve", late),
+            self.comment("ci[bot]", "/factory approve", late, kind="Bot"),
+            self.comment("owner", "/factoryx approve", late),
+            self.comment("owner", "/factory   make it blue\nand bigger", late),
+            self.comment("owner", "looks good", late),
+        ]})
+        box = json.loads(self.run_state("inbox", self.id, env=env).stdout)
+        self.assertEqual([a["answer"] for a in box["answers"]], ["make it blue\nand bigger"])
+        self.assertEqual(sorted((i["author"], i["reason"]) for i in box["ignored"]),
+                         [("ci[bot]", "bot"), ("reader", "no write access"), ("stranger", "no write access")])
+        self.assertEqual(box["feedback"], [])  # issue chatter is not PR feedback
+        allow = {**env, "FACTORY_APPROVERS": "Stranger, other"}
+        box = json.loads(self.run_state("inbox", self.id, env=allow).stdout)
+        self.assertEqual([a["author"] for a in box["answers"]], ["stranger"])
+
+    def test_inbox_trusts_only_the_owner_when_permissions_cannot_be_read(self):
+        self.advance("spec", "checkpoint-1")
+        self.run_state("set", self.id, "thread_url", "https://github.com/o/r/issues/3")
+        late = "2999-01-01T00:00:00Z"
+        env = self.github({"perms_blocked": True, "repos/o/r/issues/3/comments": [
+            self.comment("owner", "/factory approve", late, author_association="OWNER"),
+            self.comment("member", "/factory abort", late, author_association="MEMBER")]})
+        box = json.loads(self.run_state("inbox", self.id, env=env).stdout)
+        self.assertEqual([a["author"] for a in box["answers"]], ["owner"])
+        self.assertEqual([i["author"] for i in box["ignored"]], ["member"])
+
+    def test_inbox_on_a_pr_reads_reviews_and_inline_comments_since_the_last_fix_round(self):
+        self.ship()
+        env = self.github({"perms": {"rev": "write"},
+                           "repos/o/r/issues/7/comments": [self.comment("rev", "please rename", "2999-01-01T00:00:01Z")],
+                           "repos/o/r/pulls/7/reviews": [
+                               {"user": {"login": "rev", "type": "User"}, "state": "CHANGES_REQUESTED", "body": "",
+                                "submitted_at": "2999-01-01T00:00:02Z", "html_url": "r1"},
+                               {"user": {"login": "rev", "type": "User"}, "state": "APPROVED", "body": "",
+                                "submitted_at": "2999-01-01T00:00:03Z", "html_url": "r2"}],
+                           "repos/o/r/pulls/7/comments": [
+                               self.comment("lint[bot]", "unused import", "2999-01-01T00:00:04Z", kind="Bot",
+                                            path="a.py", line=3),
+                               self.comment("drive-by", "/factory ship", "2999-01-01T00:00:05Z", path="a.py", line=1)]})
+        box = json.loads(self.run_state("inbox", self.id, env=env).stdout)
+        self.assertEqual([(f["kind"], f["author"], f["trusted"]) for f in box["feedback"]],
+                         [("comment", "rev", True), ("review", "rev", True), ("inline", "lint[bot]", False)])
+        self.assertEqual(box["feedback"][2]["path"], "a.py")
+        self.assertEqual(box["ignored"][0]["author"], "drive-by")
+        self.advance("implement")
+        self.assertEqual(json.loads(self.run_state("inbox", self.id, env=env).stdout)["since"], self.state()["history"][-1]["at"])
+
+    def test_checkpoint_post_puts_the_spec_on_the_issue_when_enabled(self):
+        folder = self.repo / ".factory/runs" / self.id
+        self.assertIn("not a checkpoint", self.run_state("checkpoint-post", self.id, ok=False).stderr)
+        self.advance("spec", "checkpoint-1")
+        self.assertIn("no thread_url", self.run_state("checkpoint-post", self.id, ok=False).stderr)
+        self.run_state("set", self.id, "thread_url", "https://github.com/o/r/issues/3")
+        self.assertIn("postCheckpoints", self.run_state("checkpoint-post", self.id, ok=False).stderr)
+        (folder / "spec.md").write_text("# Spec: blue\n\n## Acceptance criteria\n- [ ] AC1: it is blue\n")
+        self.git("config", "factory.postCheckpoints", "true")
+        out = self.run_state("checkpoint-post", self.id).stdout.splitlines()
+        self.assertEqual(out[1], f"gh issue comment https://github.com/o/r/issues/3 --body-file {folder / 'checkpoint-post.md'}")
+        post = (folder / "checkpoint-post.md").read_text()
+        self.assertTrue(post.startswith(f"<!-- factory-checkpoint: {self.id} checkpoint-1 -->"))
+        self.assertIn("# Spec: blue\n\n## Acceptance criteria\n- [ ] AC1: it is blue\n", post)
+        self.assertIn("`/factory approve`", post)
+
+    def test_checkpoint_post_on_the_pr_needs_no_opt_in(self):
+        self.ship()
+        self.advance("implement", "review", "verify", "checkpoint-2", "blocked")
+        folder = self.repo / ".factory/runs" / self.id
+        self.run_state("advance", self.id, "checkpoint-2", "PR feedback did not converge")
+        out = self.run_state("checkpoint-post", self.id).stdout.splitlines()
+        self.assertTrue(out[1].startswith("gh pr comment https://github.com/o/r/pull/7 "))
+        post = (folder / "checkpoint-post.md").read_text()
+        self.assertIn("**Note:** PR feedback did not converge", post)
+        self.assertIn("push this round to the PR", post)
+
+    def test_pr_update_summarizes_a_fix_round(self):
+        self.ship()
+        self.assertIn("pr-report", self.run_state("pr-update", self.id, ok=False).stderr)
+        folder = self.repo / ".factory/runs" / self.id
+        (folder / "implementation.md").write_text("# Implementation\n\n## Addressed\n- renamed foo (review r1)\n\n"
+                                                  "## Checks run\n- tests: pass\n")
+        self.advance("implement", "review", "verify", "ship")
+        out = self.run_state("pr-update", self.id).stdout.splitlines()
+        self.assertEqual(out[1], f"gh pr comment https://github.com/o/r/pull/7 --body-file {folder / 'pr-update.md'}")
+        post = (folder / "pr-update.md").read_text()
+        self.assertTrue(post.startswith(f"<!-- factory-update: {self.id} 1 -->"))
+        self.assertIn("### Addressed\n\n- renamed foo (review r1)\n\n**Verification:**", post)
+        self.assertIn("· PR fixes 1", post)
+        self.assertNotIn("Checks run", post)
+
+    def test_usage_and_stats(self):
+        self.run_state("usage", self.id, "triage", "1200", "0.05")
+        self.run_state("usage", self.id, "spec", "800")
+        self.run_state("usage", self.id, "spec", "x", ok=False)
+        self.advance("spec", "checkpoint-1")
+        self.run_state("advance", self.id, "spec", "revise")
+        self.advance("checkpoint-1", "implement", "review", "verify", "checkpoint-2", "implement", "review",
+                     "verify", "checkpoint-2", "ship")
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        self.advance("land", "implement", "review", "verify", "ship", "land", "merged")
+        st = json.loads(self.run_state("stats", self.id, "--json").stdout)
+        self.assertEqual((st["spec_revisions"], st["send_backs"], st["tokens"], st["usd"]), (1, 1, 2000, 0.05))
+        self.assertEqual(st["rounds"]["land"], 1)
+        self.assertIsNotNone(st["to_merge"])
+        self.assertIn("land", st["seconds"]["by_stage"])
+        self.assertIn("tokens 2000 · $0.05", self.run_state("stats", self.id).stdout)
+        self.run_state("new", "other", "-", input="x")
+        all_runs = json.loads(self.run_state("stats", "--json").stdout)["summary"]
+        self.assertEqual((all_runs["runs"], all_runs["outcomes"], all_runs["merge_rate"]), (2, {"merged": 1, "open": 1}, 1.0))
+        self.assertEqual((all_runs["spec_approved_first_time"], all_runs["ship_approved_first_time"]), (0.0, 0.0))
+        self.assertIn("merge rate: 100% of 1 finished PRs", self.run_state("stats").stdout)
+
     def test_set_guards(self):
         for field in ("stage", "rounds", "loop", "history", "id", "repo", "branch", "base_branch", "worktree"):
             self.run_state("set", self.id, field, "x", ok=False)
@@ -138,7 +379,7 @@ class StateTest(unittest.TestCase):
     def test_human_stages_reset_attempts(self):
         for human in ("checkpoint-2", "blocked", "checkpoint-1"):
             self.advance("implement", "review", "verify", human)
-            self.assertEqual(self.state()["loop"], {"review": 0, "verify": 0}, human)
+            self.assertEqual(self.state()["loop"], {"land": 0, "review": 0, "verify": 0}, human)
         self.assertEqual(self.state()["rounds"]["review"], 3)
 
     def test_feedback_appends_under_heading(self):
