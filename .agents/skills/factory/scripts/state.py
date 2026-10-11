@@ -27,6 +27,7 @@ Usage:
                                          (needs gh; REST only)
   state.py inbox <run-id>                print new comments on the issue and PR as JSON: /factory
                                          answers from people with write access, and feedback
+  state.py seen <run-id>                 mark the comments read so far, so inbox starts after them
   state.py checkpoint-post <run-id>      write checkpoint-post.md for the current checkpoint and print
                                          the gh command that posts it on the issue or PR
   state.py pr-update <run-id>            write pr-update.md, the PR comment for a pushed fix round
@@ -555,6 +556,8 @@ def cmd_pr_report(run_id, no_media=False):
         # Run from the run folder: --attach paths and the references in the body are relative to it.
         attach = "".join(f" --attach {shlex.quote(u)}" for u in uploads)
         print(f"cd {shlex.quote(str(folder))} && gh pr comment {shlex.quote(s['pr_url'])} --body-file pr-report.md{attach}")
+        if GITHUB_URL.match(s["pr_url"]):
+            print(rest_fallback(s["pr_url"], report))
 
 
 GITHUB_URL = re.compile(r"https://github\.com/([^/\s]+)/([^/\s]+)/(issues|pull)/(\d+)")
@@ -564,6 +567,14 @@ WRITE_PERMISSIONS = {"admin", "maintain", "write"}
 MARKER = "<!-- factory"
 ANSWER_KEYWORDS = ("approve", "ship", "abort", "pause", "steer")
 COMMAND = re.compile(r"\A\s*/factory(?:\s+|\Z)(.*)\Z", re.DOTALL)
+
+
+def rest_fallback(url, body_file):
+    """The same comment through the REST API, for hosts that block the GraphQL API `gh ... comment` uses.
+    It posts text only: attachments need `gh pr comment --attach`."""
+    owner, repo, _, number = github_thread(url)
+    return (f"fallback: gh api repos/{owner}/{repo}/issues/{number}/comments -F body=@{shlex.quote(str(body_file))} "
+            "--jq .html_url")
 
 
 def github_thread(url):
@@ -646,12 +657,15 @@ def cmd_pr_status(run_id):
 
 
 def inbox_since(s):
-    """When the run last took input: entering a human stage, or leaving land to fix the PR."""
+    """When the run last took input: entering a human stage, leaving land to fix the PR, or a land
+    check that marked what it read with `seen`."""
     h = s["history"]
     if s["stage"] == "land":
         left = [e["at"] for e in h if e["from"] == "land"]
-        return left[-1] if left else [e["at"] for e in h if e["to"] == "ship"][-1]
-    return h[-1]["at"]
+        since = left[-1] if left else [e["at"] for e in h if e["to"] == "ship"][-1]
+    else:
+        since = h[-1]["at"]
+    return max(since, s.get("inbox_seen") or since)
 
 
 class Trust:
@@ -731,7 +745,8 @@ def cmd_inbox(run_id):
                 elif trusted:
                     answers.append(entry)
                 else:
-                    ignored.append({**entry, "reason": "bot" if item["bot"] else "no write access"})
+                    reason = "not in factory.approvers" if trust.allow is not None else "no write access"
+                    ignored.append({**entry, "reason": "bot" if item["bot"] else reason})
             elif url == s.get("pr_url"):
                 feedback.append({**item, "trusted": trusted})
     key = lambda e: e["at"]
@@ -813,6 +828,7 @@ def cmd_checkpoint_post(run_id):
     print(post)
     noun = "pr" if kind == "pull" else "issue"
     print(f"gh {noun} comment {shlex.quote(target)} --body-file {shlex.quote(str(post))}")
+    print(rest_fallback(target, post))
 
 
 def cmd_pr_update(run_id):
@@ -835,6 +851,15 @@ def cmd_pr_update(run_id):
     post.write_text(body.rstrip() + "\n")
     print(post)
     print(f"gh pr comment {shlex.quote(s['pr_url'])} --body-file {shlex.quote(str(post))}")
+    print(rest_fallback(s["pr_url"], post))
+
+
+def cmd_seen(run_id):
+    """Mark every comment so far as read, so the next inbox starts after them."""
+    path, s = load(run_id)
+    s["inbox_seen"] = now()
+    save(path, s)
+    print(f"inbox_seen = {s['inbox_seen']}")
 
 
 def cmd_usage(run_id, stage, tokens, usd=None):
@@ -1219,7 +1244,7 @@ COMMANDS = {
     "check-verification": (cmd_check_verification, 1), "pr-report": (cmd_pr_report, 1),
     "release": (cmd_release, 1), "pr-status": (cmd_pr_status, 1), "inbox": (cmd_inbox, 1),
     "checkpoint-post": (cmd_checkpoint_post, 1), "pr-update": (cmd_pr_update, 1), "usage": (cmd_usage, 3), "stats": (cmd_stats, 0),
-    "policy": (cmd_policy, 1), "learn": (cmd_learn, 1), "signals": (cmd_signals, 0),
+    "policy": (cmd_policy, 1), "learn": (cmd_learn, 1), "signals": (cmd_signals, 0), "seen": (cmd_seen, 1),
 }
 
 

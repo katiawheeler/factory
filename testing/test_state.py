@@ -260,6 +260,7 @@ else:
         allow = {**env, "FACTORY_APPROVERS": "Stranger, other"}
         box = json.loads(self.run_state("inbox", self.id, env=allow).stdout)
         self.assertEqual([a["author"] for a in box["answers"]], ["stranger"])
+        self.assertEqual({i["reason"] for i in box["ignored"] if i["author"] == "owner"}, {"not in factory.approvers"})
 
     def test_inbox_trusts_only_the_owner_when_permissions_cannot_be_read(self):
         self.advance("spec", "checkpoint-1")
@@ -292,6 +293,9 @@ else:
         self.assertEqual(box["ignored"][0]["author"], "drive-by")
         self.advance("implement")
         self.assertEqual(json.loads(self.run_state("inbox", self.id, env=env).stdout)["since"], self.state()["history"][-1]["at"])
+        self.run_state("seen", self.id)
+        box = json.loads(self.run_state("inbox", self.id, env=env).stdout)
+        self.assertEqual(box["since"], self.state()["inbox_seen"])  # starts after what land already read
         self.assertNotIn("inbox", self.run_state("show", self.id).stderr)
         self.advance("blocked")
         r = self.run_state("show", self.id)
@@ -312,6 +316,7 @@ else:
         self.assertIn(f"checkpoint-post {self.id}", self.run_state("advance", self.id, "checkpoint-1").stdout)
         out = self.run_state("checkpoint-post", self.id).stdout.splitlines()
         self.assertEqual(out[1], f"gh issue comment https://github.com/o/r/issues/3 --body-file {folder / 'checkpoint-post.md'}")
+        self.assertEqual(out[2], f"fallback: gh api repos/o/r/issues/3/comments -F body=@{folder / 'checkpoint-post.md'} --jq .html_url")
         post = (folder / "checkpoint-post.md").read_text()
         self.assertTrue(post.startswith(f"<!-- factory-checkpoint: {self.id} checkpoint-1 -->"))
         self.assertIn("# Spec: blue\n\n## Acceptance criteria\n- [ ] AC1: it is blue\n", post)
