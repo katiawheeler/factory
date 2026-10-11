@@ -289,6 +289,11 @@ else:
         self.assertEqual(box["ignored"][0]["author"], "drive-by")
         self.advance("implement")
         self.assertEqual(json.loads(self.run_state("inbox", self.id, env=env).stdout)["since"], self.state()["history"][-1]["at"])
+        self.assertNotIn("inbox", self.run_state("show", self.id).stderr)
+        self.advance("blocked")
+        r = self.run_state("show", self.id)
+        self.assertIn(f"run `inbox {self.id}`", r.stderr)
+        json.loads(r.stdout)
 
     def test_checkpoint_post_puts_the_spec_on_the_issue_when_enabled(self):
         folder = self.repo / ".factory/runs" / self.id

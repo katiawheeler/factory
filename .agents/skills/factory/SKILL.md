@@ -98,7 +98,7 @@ Log feedback under consistent headings: `Checkpoint 1: round N`, `Checkpoint 2: 
 1. **Empty** → run `STATE list` and stop.
 2. **`signals`** → check merged runs: see "Signals after merge" below.
 3. **`follow-up <run-id> <details>`** → a new run for a problem an earlier run caused. Start it as in Step 1 with `--parent <run-id>`; its input is the details plus the parent's `pr_url` and `input_summary`.
-4. **The first word is an existing run ID** → **resume**. Run `STATE show <id>` and continue from `stage`. If the rest of the arguments aren't empty, they're the **checkpoint answer**. Apply it as described in "Asking at a checkpoint" below, and don't ask again. If they're empty, the run is at `checkpoint-1`, `checkpoint-2`, or `blocked`, and it has a `thread_url` or `pr_url`, first check GitHub for an answer: see "Answers on GitHub" below. A run that has ended without a retro (`get <id> learned_at` fails) gets its retro now: see **Finish**.
+4. **The first word is an existing run ID** → **resume**. Run `STATE show <id>` and continue from `stage`. Act on any `note:` it prints. If the rest of the arguments aren't empty, they're the **checkpoint answer**. Apply it as described in "Asking at a checkpoint" below, and don't ask again. If they're empty, the run is at `checkpoint-1`, `checkpoint-2`, or `blocked`, and it has a `thread_url` or `pr_url`, first check GitHub for an answer: see "Answers on GitHub" below. A run that has ended without a retro (`get <id> learned_at` fails) gets its retro now: see **Finish**.
 5. **Anything else** → **new run**. The whole argument is the input: a ticket key, a URL, a prompt, anything. Don't interpret it here. Resolving it is triage's job.
 
 ## Step 1: New run

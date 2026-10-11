@@ -1227,7 +1227,13 @@ def main(argv):
     if name == "show":
         if len(args) != 1:
             die("usage: show <run-id>")
-        print(load(args[0])[0].read_text(), end="")
+        path, s = load(args[0])
+        print(path.read_text(), end="")
+        if s["stage"] in HUMAN_STAGES and (s.get("thread_url") or s.get("pr_url")):
+            # Resuming without an answer must look on GitHub first; say so where the orchestrator looks.
+            print(f"note: {s['id']} is waiting on a human and has a GitHub thread. Without an answer in the "
+                  f"arguments, run `inbox {s['id']}` and apply the latest /factory answer before asking.",
+                  file=sys.stderr)
         return
     fn, nargs = COMMANDS[name]
     if name == "new":
