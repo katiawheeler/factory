@@ -148,6 +148,35 @@ class StateTest(unittest.TestCase):
         self.assertEqual(json.loads(self.run_state("skips", env={"FACTORY_SKIP": "spec"}).stdout),
                          ["spec", "checkpoint-1"])
 
+    def test_skip_for_one_run(self):
+        self.assertIn("--skip can't skip implement",
+                      self.run_state("new", "x", "-", "--skip", "implement", input="x", ok=False).stderr)
+        self.id = self.run_state("new", "auto", "-", "--skip", "spec,checkpoint-2", input="x").stdout.split()[0]
+        s = self.state()
+        self.assertEqual(s["skip"], ["spec", "checkpoint-1", "checkpoint-2"])
+        self.assertEqual(s["history"][0]["note"], "run created, skipping spec, checkpoint-1, checkpoint-2")
+        self.assertEqual(json.loads(self.run_state("skips", self.id).stdout), ["spec", "checkpoint-1", "checkpoint-2"])
+        self.assertEqual(json.loads(self.run_state("skips").stdout), [])
+        (self.repo / ".factory/runs" / self.id / "triage.md").write_text("Verdict: proceed\n")
+        self.advance("implement")
+        self.assertEqual(self.state()["history"][-1]["note"], "skipped spec, checkpoint-1 (--skip)")
+        self.run_state("advance", self.id, "verify", ok=False)  # review isn't skipped for this run
+        # The repo's setting adds to the run's own.
+        self.git("config", "factory.skip", "review")
+        self.advance("verify")
+        folder = self.repo / ".factory/runs" / self.id
+        (folder / "verification.md").write_text("Verdict: pass\nSuite: pass\n")
+        self.advance("ship")
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        self.run_state("pr-report", self.id)
+        report = (folder / "pr-report.md").read_text()
+        self.assertIn("**Skipped by this run's `--skip` and the repo's `factory.skip`:** spec, checkpoint-1, review, "
+                      "checkpoint-2.", report)
+        # Other runs don't inherit this run's --skip.
+        self.git("config", "--unset", "factory.skip")
+        self.id = self.run_state("new", "other", "-", input="x").stdout.split()[0]
+        self.run_state("advance", self.id, "implement", ok=False)
+
     def test_skip_review_and_verify(self):
         self.git("config", "factory.skip", "review, verify")
         self.advance("spec", "checkpoint-1", "implement", "checkpoint-2")
@@ -156,8 +185,9 @@ class StateTest(unittest.TestCase):
         self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
         self.run_state("pr-report", self.id)
         report = (self.repo / ".factory/runs" / self.id / "pr-report.md").read_text()
-        self.assertIn("**Skipped by `factory.skip`:** review, verify.", report)
-        self.assertIn("**Verification:** skipped by `factory.skip`", report)
+        self.assertIn("**Skipped by the repo's `factory.skip`:** review, verify.", report)
+        self.assertIn("**Verification:** skipped", report)
+        self.assertIn("(factory.skip)", self.state()["history"][4]["note"])
         self.assertNotIn("No human approved shipping", report)
 
     def test_skip_everything_goes_from_input_to_pr(self):
@@ -167,8 +197,8 @@ class StateTest(unittest.TestCase):
         self.advance("ship")
         self.assertEqual(self.state()["history"][-1]["skipped"], ["review", "verify", "checkpoint-2"])
         self.assertEqual(self.run_state("approval", self.id).stdout.strip().splitlines(), [
-            "Spec: skipped by factory.skip; no spec was written and no human approved the work before implementation",
-            "Ship: no human approved shipping; checkpoint 2 was skipped by factory.skip"])
+            "Spec: skipped; no spec was written and no human approved the work before implementation",
+            "Ship: no human approved shipping; checkpoint 2 was skipped"])
         self.assertIn("recorded PR URL", self.run_state("advance", self.id, "land", ok=False).stderr)
         self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
         self.advance("land", "implement", "ship", "land", "merged")

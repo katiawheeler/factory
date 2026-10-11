@@ -6,10 +6,11 @@ thing that writes state.json, so stage names and terminal completion are
 checked and every transition is logged the same way.
 
 Usage:
-  state.py new <slug> <input-file|-> [--in-place] [--parent <run-id>]
+  state.py new <slug> <input-file|-> [--in-place] [--parent <run-id>] [--skip <stages>]
                                          create a run in its own worktree (or in the
                                          current checkout); prints run id, folder, repo.
-                                         --parent links a follow-up to the run it came from
+                                         --parent links a follow-up to the run it came from;
+                                         --skip lists stages this run skips (like factory.skip)
   state.py list                          list runs with stage and summary
   state.py show <run-id>                 print state.json
   state.py get <run-id> <field>          print one field (dotted, e.g. rounds.review)
@@ -40,10 +41,11 @@ Usage:
   state.py signals [<run-id>] [--days N] check merged runs for reverts, red CI on the merge commit,
                                          and the repo's own signal command; JSON
   state.py release <run-id>              remove a finished run's worktree (keeps the branch)
-  state.py skips                         the stages this repo skips (git config factory.skip), as JSON
+  state.py skips [<run-id>]              the stages skipped (factory.skip, plus the run's --skip), as JSON
 
-`advance` only takes the loop's own moves. `git config factory.skip <stages|all>` lets runs jump over
-triage, spec, checkpoint-1, review, verify and checkpoint-2; implement, ship and land are never skipped.
+`advance` only takes the loop's own moves. `git config factory.skip <stages|all>` (every run) or
+`new --skip <stages|all>` (one run) lets runs jump over triage, spec, checkpoint-1, review, verify and
+checkpoint-2; implement, ship and land are never skipped.
 
 Entering checkpoint-1, checkpoint-2, blocked, land, merged or closed runs the notify command,
 if one is set in $FACTORY_NOTIFY or `git config factory.notify`, with the event JSON on stdin.
@@ -73,7 +75,7 @@ TERMINAL = {"merged", "closed", "done", "aborted"}
 NOTIFY_STAGES = HUMAN_STAGES | {"land", "merged", "closed", "done"}
 SETTABLE = ("input_summary", "pr_url", "report_url", "thread_url")
 CAP_NOTES = ("review did not converge", "verify did not pass", "PR feedback did not converge")
-# The road from input to PR. factory.skip may jump over any of these but implement and ship.
+# The road from input to PR. factory.skip and --skip may jump over any of these but implement and ship.
 PATH = ["triage", "spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship"]
 SKIPPABLE = ("triage", "spec", "checkpoint-1", "review", "verify", "checkpoint-2")
 # Every other move a run may make, besides blocked and aborted from any stage. Loops go back to
@@ -176,10 +178,12 @@ def check_base_is_current(base):
               f"the run starts from local {base}", file=sys.stderr)
 
 
-def cmd_new(slug, source, in_place=False, parent=None):
+def cmd_new(slug, source, in_place=False, parent=None, skip=None):
     root = repo_root()
     if parent:
         load(parent)
+    skip = parse_skips(skip, "--skip") if skip is not None else []
+    parse_skips(setting("skip", "FACTORY_SKIP"), "factory.skip")
     status = git("status", "--porcelain")
     if status.returncode != 0:
         die(status.stderr.strip() or "could not inspect working tree")
@@ -234,7 +238,9 @@ def cmd_new(slug, source, in_place=False, parent=None):
         "thread_url": None,
         "usage": [],
         "parent_run": parent,
-        "history": [{"at": now(), "from": None, "to": "triage", "note": "run created"}],
+        "skip": skip,
+        "history": [{"at": now(), "from": None, "to": "triage",
+                     "note": "run created" + (f", skipping {', '.join(skip)}" if skip else "")}],
     }
     save(folder / "state.json", state)
     print(run_id)
@@ -278,21 +284,37 @@ def cmd_get(run_id, field):
     print(json.dumps(val) if isinstance(val, (dict, list)) else val)
 
 
-def skip_setting():
-    """The stages the repo lets runs skip (git config factory.skip). Skipping spec skips its approval too."""
-    names = [w.lower() for w in words(setting("skip", "FACTORY_SKIP"))]
+def parse_skips(value, source):
+    """Stage names from a skip list, in loop order. Skipping spec skips its approval too."""
+    names = [w.lower() for w in words(value)]
     if "all" in names:
         names = list(SKIPPABLE)
     bad = [n for n in names if n not in SKIPPABLE]
     if bad:
-        die(f"factory.skip can't skip {', '.join(bad)}; it takes any of: all, {', '.join(SKIPPABLE)}")
+        die(f"{source} can't skip {', '.join(bad)}; it takes any of: all, {', '.join(SKIPPABLE)}")
     if "spec" in names:
         names.append("checkpoint-1")
-    return set(names)
+    return [stage for stage in SKIPPABLE if stage in names]
 
 
-def cmd_skips():
-    print(json.dumps([stage for stage in SKIPPABLE if stage in skip_setting()]))
+def skip_setting(s=None):
+    """The stages a run may skip: the repo's factory.skip, plus the run's own --skip."""
+    return set(parse_skips(setting("skip", "FACTORY_SKIP"), "factory.skip")) | set((s or {}).get("skip") or [])
+
+
+def skip_source(s, stages):
+    """Where a skip came from, for the history and the reports."""
+    own = set(s.get("skip") or [])
+    if set(stages) <= own:
+        return "--skip"
+    if not set(stages) & own:
+        return "factory.skip"
+    return "--skip and factory.skip"
+
+
+def cmd_skips(run_id=None):
+    s = load(run_id)[1] if run_id else None
+    print(json.dumps([stage for stage in SKIPPABLE if stage in skip_setting(s)]))
 
 
 def skipped_between(s, stage):
@@ -301,7 +323,7 @@ def skipped_between(s, stage):
     if here not in PATH or stage not in PATH or PATH.index(stage) <= PATH.index(here) + 1:
         return None
     between = PATH[PATH.index(here) + 1:PATH.index(stage)]
-    return between if set(between) <= skip_setting() else None
+    return between if set(between) <= skip_setting(s) else None
 
 
 def run_skips(s):
@@ -338,7 +360,7 @@ def cmd_advance(run_id, stage, note=""):
     if jumped is None and stage not in MOVES[s["stage"]] | {"blocked", "aborted"}:
         allowed = ", ".join(sorted(MOVES[s["stage"]] | {"blocked", "aborted"}))
         die(f"a run at '{s['stage']}' cannot move to '{stage}'; it can go to: {allowed}. "
-            "Skipping stages needs `git config factory.skip`")
+            "Skipping stages needs `--skip` when the run starts, or `git config factory.skip`")
     if stage == "done" and not s.get("pr_url"):
         die("done requires the ship stage and a recorded PR URL")
     # A blocked run with an open PR goes back to following it without a fake ship.
@@ -355,11 +377,11 @@ def cmd_advance(run_id, stage, note=""):
         if failing:
             die(f"ship approval is skipped, but this work can't ship without a human: {failing}")
     # A skipped triage or spec is left without writing its output file.
-    left = s["stage"] in ("triage", "spec") and s["stage"] in skip_setting() \
+    left = s["stage"] in ("triage", "spec") and s["stage"] in skip_setting(s) \
         and not (path.parent / f"{s['stage']}.md").exists()
     skipped = ([s["stage"]] if left else []) + (jumped or [])
     if skipped:
-        note = (note + "; " if note else "") + f"skipped {', '.join(skipped)} (factory.skip)"
+        note = (note + "; " if note else "") + f"skipped {', '.join(skipped)} ({skip_source(s, skipped)})"
     if s["stage"] == "spec" and stage == "implement" and not jumped:
         # Skipping spec approval is the repo's explicit choice, checked here rather than trusted to the caller.
         decision = spec_policy(path.parent, s)
@@ -612,9 +634,9 @@ def spec_approval(s):
         return None
     last = approvals[-1]
     if "spec" in last.get("skipped", []):
-        return "skipped by factory.skip; no spec was written and no human approved the work before implementation"
+        return "skipped; no spec was written and no human approved the work before implementation"
     if "checkpoint-1" in last.get("skipped", []):
-        return "not approved: checkpoint 1 was skipped by factory.skip; no human reviewed it before implementation"
+        return "not approved: checkpoint 1 was skipped; no human reviewed it before implementation"
     if last["from"] == "spec":
         why = re.sub(r"^spec auto-approved by policy\s*", "", last["note"] or "")
         return f"auto-approved by policy {why}; no human reviewed it before implementation".replace("  ", " ")
@@ -629,7 +651,7 @@ def cmd_approval(run_id):
         print(f"Ship: {SHIP_SKIPPED}")
 
 
-SHIP_SKIPPED = "no human approved shipping; checkpoint 2 was skipped by factory.skip"
+SHIP_SKIPPED = "no human approved shipping; checkpoint 2 was skipped"
 
 
 def skips_summary(s):
@@ -637,7 +659,9 @@ def skips_summary(s):
     skips = run_skips(s)
     if not skips:
         return []
-    line = f"**Skipped by `factory.skip`:** {', '.join(skips)}."
+    source = {"--skip": "this run's `--skip`", "factory.skip": "the repo's `factory.skip`"}.get(
+        skip_source(s, skips), "this run's `--skip` and the repo's `factory.skip`")
+    line = f"**Skipped by {source}:** {', '.join(skips)}."
     if "checkpoint-2" in skips:
         line += f" {SHIP_SKIPPED[0].upper()}{SHIP_SKIPPED[1:]}."
     return [line, ""]
@@ -650,7 +674,7 @@ def results_summary(folder, s):
     out = []
     try:
         if "verify" in run_skips(s) and not (folder / "verification.md").exists():
-            out += ["**Verification:** skipped by `factory.skip`", ""]
+            out += ["**Verification:** skipped", ""]
         else:
             verdict, suite, found = verification_results(folder, s)
             out += [f"**Verification:** {verdict} · test suite {suite}", ""]
@@ -1384,7 +1408,7 @@ def cmd_stats(run_id=None, as_json=False):
         print(f"specs auto-approved by policy: {summary['auto_approved_specs']}, "
               f"{summary['auto_specs_sent_back_to_spec']} later sent back to spec at ship approval")
     if summary["runs_with_skips"]:
-        print(f"runs that skipped stages (factory.skip): {summary['runs_with_skips']}, "
+        print(f"runs that skipped stages: {summary['runs_with_skips']}, "
               f"{summary['shipped_without_ship_approval']} shipped without ship approval")
     if summary["merged_runs_checked_for_signals"]:
         print(f"regressions after merge: {summary['regressions']} of {summary['merged_runs_checked_for_signals']} "
@@ -1443,13 +1467,15 @@ def main(argv):
     fn, nargs = COMMANDS[name]
     if name == "new":
         if len(args) < 2:
-            die("usage: new <slug> <input-file|-> [--in-place] [--parent <run-id>]")
+            die("usage: new <slug> <input-file|-> [--in-place] [--parent <run-id>] [--skip <stages>]")
         rest, opts = args[2:], {}
         while rest:
             if rest[0] == "--in-place":
                 opts["in_place"], rest = True, rest[1:]
             elif rest[0] == "--parent" and len(rest) > 1:
                 opts["parent"], rest = rest[1], rest[2:]
+            elif rest[0] == "--skip" and len(rest) > 1:
+                opts["skip"], rest = rest[1], rest[2:]
             else:
                 die(f"unknown option '{rest[0]}' for new")
         return fn(*args[:2], **opts)
@@ -1463,6 +1489,8 @@ def main(argv):
         if len(args) > 1:
             die("usage: signals [<run-id>] [--days N]")
         return fn(*args, days=days)
+    if name == "skips" and len(args) <= 1:
+        return fn(*args)
     if name == "pr-report" and args[1:] == ["--no-media"]:
         return fn(args[0], no_media=True)
     if name == "advance" and len(args) in (2, 3):

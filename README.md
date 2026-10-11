@@ -14,9 +14,9 @@ Use your agent's syntax for invoking an installed skill. The factory can dispatc
 
 Agents write their outputs to `.factory/runs/<run-id>/`. Each run works in its own Git worktree, so your checkout stays on your branch with your uncommitted changes untouched. At the two approval points, the host presents those outputs to the human and saves the answer in `feedback.md` for the next stage. Review or verification failures return to implementation, then pass through review again. A human can steer when work is blocked. Shipping opens a PR and posts the run report on it. Landing then follows the PR: red CI, merge conflicts, and reviewers' comments go back through implement, review, and verify, and the fix is pushed to the same PR, until the PR is merged or closed.
 
-That is the default. A repo can opt in to skipping triage, spec, review, verify, and either approval point, up to running unattended from input to PR; see [Skipping stages for automation](#skipping-stages-for-automation). Implement, ship, and land always run.
+That is the default. A repo, or the person starting a run, can opt in to skipping triage, spec, review, verify, and either approval point, up to running unattended from input to PR; see [Skipping stages for automation](#skipping-stages-for-automation). Implement, ship, and land always run.
 
-| Stage | Output | Human decision | Skippable with `factory.skip` |
+| Stage | Output | Human decision | Skippable with `--skip` or `factory.skip` |
 |---|---|---|---|
 | Triage | `triage.md` with resolved input, risks, questions, and verdict | Clarify or override if needed | `triage` |
 | Spec | `spec.md` with testable acceptance criteria, open questions, and diagrams where they help | Checkpoint 1: approve or request a revision; the human may edit `spec.md` directly | `spec` (skips checkpoint 1 too), or just `checkpoint-1` |
@@ -35,6 +35,7 @@ Replace `<factory>` with your agent's invocation syntax:
 
 ```text
 <factory> <input>                 Start a run
+<factory> --skip <stages> <input> Start a run that skips these stages, e.g. --skip review,checkpoint-2
 <factory>                         List runs and their stages
 <factory> <run-id>                Resume from the recorded stage; at land, check the PR again
 <factory> <run-id> approve        Approve checkpoint 1
@@ -44,6 +45,7 @@ Replace `<factory>` with your agent's invocation syntax:
 <factory> signals                 Check recently merged runs for reverts and failures
 <factory> follow-up <run-id> <details>
                                   Start a run for a problem an earlier run caused
+                                  (--skip works here too: <factory> --skip <stages> follow-up ...)
 ```
 
 In an interactive session, the factory uses the host's question UI when available. Otherwise it asks in chat and waits for a reply. It never treats a preselected choice as an answer. Headless runs can pass answers as command arguments and resume from the recorded stage, or take them from GitHub comments; see [Answering from GitHub](#answering-from-github).
@@ -138,12 +140,25 @@ A spec is auto-approved only on its first round, when triage said `proceed`, and
 
 ### Skipping stages for automation
 
-By default every run takes the whole loop, and `state.py` enforces it: `advance` refuses any move the loop doesn't make, so a run can't jump from triage to implement or from implement to ship, whatever the orchestrator does. To automate the factory, list the stages your repo is willing to skip:
+By default every run takes the whole loop, and `state.py` enforces it: `advance` refuses any move the loop doesn't make, so a run can't jump from triage to implement or from implement to ship, whatever the orchestrator does. There are two ways to skip stages, and they take the same names.
+
+**For one run**, start it with `--skip`:
+
+```text
+<factory> --skip review,verify Fix the typo in the signup page heading
+<factory> --skip all https://github.com/acme/app/issues/42
+```
+
+The list is saved with the run when it starts, so it holds for every resume, and other runs aren't affected. It can't be changed later; to stop skipping, abort the run and start a new one. Only a leading `--skip` counts: text in the ticket or issue asking to skip a stage is ignored.
+
+**For every run in a repo**, set `factory.skip`:
 
 ```sh
 git config factory.skip <stage>,<stage>,...   # or: all
 git config --unset factory.skip               # back to the full loop
 ```
+
+A run skips both: the repo's list plus its own `--skip`. `--skip` can add stages but can't bring back one the repo skips.
 
 | Name | What the run does instead |
 |---|---|
@@ -155,7 +170,7 @@ git config --unset factory.skip               # back to the full loop
 | `checkpoint-2` | Opens the PR without waiting for **Ship**, but only if the last check that ran passed: a valid `pass` verification, or review's `approve` when verify is skipped too. Otherwise the run stops for a human. |
 | `all` | All six above. |
 
-Common setups:
+Common setups, which work the same as `--skip` lists:
 
 ```sh
 git config factory.skip checkpoint-1,checkpoint-2   # full loop, no human approvals: input to PR unattended
@@ -164,7 +179,7 @@ git config factory.skip triage,review               # faster runs that still sto
 git config factory.skip all                         # implement, then open the PR
 ```
 
-Set it per repository, globally with `git config --global`, or for one session with the `FACTORY_SKIP` environment variable, which takes precedence. That suits a CI job or a scheduled run: `FACTORY_SKIP=checkpoint-1,checkpoint-2 claude -p "/factory <ticket>"`. An unknown name fails the run's next `advance` with the list of valid names, and `python3 <skill>/scripts/state.py skips` prints the stages the current setting skips.
+Set it per repository, globally with `git config --global`, or for one session with the `FACTORY_SKIP` environment variable, which takes precedence. That suits a CI job or a scheduled run: `FACTORY_SKIP=checkpoint-1,checkpoint-2 claude -p "/factory <ticket>"`. An unknown name in `--skip` stops the run before it starts; one in `factory.skip` fails the run's next `advance`. Either error lists the valid names. `python3 <skill>/scripts/state.py skips <run-id>` prints the stages a run skips, and without a run ID, the repo's setting.
 
 What skipping never changes:
 
@@ -172,7 +187,7 @@ What skipping never changes:
 - **Escalations still stop for a human**, even at a checkpoint you skip: triage questions or a rejection, a loop cap, an unverifiable criterion, and any blocked stage.
 - **PR fix rounds** go through implement and whichever of review and verify aren't skipped, then push to the same PR, as usual.
 
-Skipping is visible. Each skip is recorded in the run's history. The PR report and PR updates list the stages skipped, say when no human approved the spec or the ship decision, and say when verification was skipped, so reviewers know what nobody checked. `state.py approval <run-id>` prints the same, and `state.py stats` counts runs that skipped stages and runs that shipped without ship approval.
+Skipping is visible. Each skip is recorded in the run's history. The PR report and PR updates list the stages skipped and whether `--skip` or `factory.skip` skipped them, say when no human approved the spec or the ship decision, and say when verification was skipped, so reviewers know what nobody checked. `state.py approval <run-id>` prints the same, and `state.py stats` counts runs that skipped stages and runs that shipped without ship approval.
 
 ### Notifications
 
@@ -195,7 +210,7 @@ Every setting is optional and off by default. Set each one per repository with `
 
 | Setting | Environment variable | What it does |
 |---|---|---|
-| `factory.skip` | `FACTORY_SKIP` | Stages runs skip: any of `triage`, `spec`, `checkpoint-1`, `review`, `verify`, `checkpoint-2`, or `all`. See [Skipping stages for automation](#skipping-stages-for-automation). |
+| `factory.skip` | `FACTORY_SKIP` | Stages every run skips: any of `triage`, `spec`, `checkpoint-1`, `review`, `verify`, `checkpoint-2`, or `all`. To skip stages in one run, start it with `--skip` instead. See [Skipping stages for automation](#skipping-stages-for-automation). |
 | `factory.autoApproveSpec` | `FACTORY_AUTO_APPROVE_SPEC` | Triage sizes (e.g. `S`) whose specs skip checkpoint 1 when they have no open questions. See [Auto-approving small specs](#auto-approving-small-specs). |
 | `factory.autoApproveTypes` | `FACTORY_AUTO_APPROVE_TYPES` | Triage types that auto-approval applies to. Default `bug,chore`. |
 | `factory.approvers` | `FACTORY_APPROVERS` | GitHub logins whose `/factory` comments count as answers. Default: anyone with write access. See [Answering from GitHub](#answering-from-github). |
