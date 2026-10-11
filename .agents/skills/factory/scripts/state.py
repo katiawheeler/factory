@@ -130,6 +130,30 @@ def save(path, state):
     tmp.replace(path)
 
 
+def check_base_is_current(base):
+    """Refuse to start a run from a base branch that is behind its upstream.
+
+    Every stage diffs against the local base branch, so a stale one hides files that already changed
+    upstream (a real run missed a test added on origin/main this way, and CI failed on it).
+    """
+    upstream = git("rev-parse", "--abbrev-ref", f"{base}@{{upstream}}").stdout.strip()
+    if not upstream:
+        return
+    remote, _, branch = upstream.partition("/")
+    if git("fetch", "-q", remote, branch).returncode != 0:
+        print(f"warning: could not fetch {upstream}; the run starts from local {base}, which may be stale",
+              file=sys.stderr)
+        return
+    counts = git("rev-list", "--left-right", "--count", f"{base}...{upstream}").stdout.split()
+    ahead, behind = (int(counts[0]), int(counts[1])) if len(counts) == 2 else (0, 0)
+    if behind and not ahead:
+        die(f"{base} is {behind} commit(s) behind {upstream}; run `git pull --ff-only` first so the run "
+            "starts from the latest code")
+    if behind:
+        print(f"warning: {base} and {upstream} have diverged ({ahead} ahead, {behind} behind); "
+              f"the run starts from local {base}", file=sys.stderr)
+
+
 def cmd_new(slug, source, in_place=False, parent=None):
     root = repo_root()
     if parent:
@@ -144,6 +168,7 @@ def cmd_new(slug, source, in_place=False, parent=None):
         die("detached HEAD; switch to a base branch before creating a run")
     if base.startswith("factory/"):
         die(f"you're on run branch '{base}'; switch to the branch new work should start from")
+    check_base_is_current(base)
     # --git-path, because in a worktree .git is a file, not a directory
     exclude = Path(git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude").stdout.strip())
     lines = exclude.read_text().splitlines() if exclude.exists() else []

@@ -64,6 +64,27 @@ class StateTest(unittest.TestCase):
         self.assertEqual((self.repo / "mine.txt").read_text(), "work in progress")
         self.assertFalse((Path(r.stdout.split()[2]) / "mine.txt").exists())
 
+    def test_new_refuses_a_base_behind_its_upstream(self):
+        remote = self.repo.parent / f"{self.repo.name}-up.git"
+        other = self.repo.parent / f"{self.repo.name}-other"
+        self.addCleanup(shutil.rmtree, remote, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        self.git("remote", "add", "origin", str(remote))
+        self.git("push", "-q", "-u", "origin", "main")
+        subprocess.run(["git", "clone", "-q", str(remote), str(other)], check=True)
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "upstream",
+                 cwd=other)
+        self.git("push", "-q", "origin", "main", cwd=other)
+        err = self.run_state("new", "b", "-", input="x", ok=False).stderr
+        self.assertIn("main is 1 commit(s) behind origin/main; run `git pull --ff-only` first", err)
+        self.git("pull", "-q", "--ff-only")
+        self.run_state("new", "b", "-", input="x")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "local")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "up2", cwd=other)
+        self.git("push", "-q", "origin", "main", cwd=other)
+        self.assertIn("have diverged (1 ahead, 1 behind)", self.run_state("new", "c", "-", input="x").stderr)
+
     def test_new_in_place(self):
         (self.repo / "f").write_text("x")
         self.assertIn("dirty", self.run_state("new", "a", "-", "--in-place", ok=False).stderr)

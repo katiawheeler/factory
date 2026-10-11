@@ -104,7 +104,7 @@ Log feedback under consistent headings: `Checkpoint 1: round N`, `Checkpoint 2: 
 
 ## Step 1: New run
 
-1. Pick a 2–5 word kebab-case slug from the input. Pipe the raw input into `STATE new <slug> -`. Add `--in-place` only if the human asked to work in their checkout. If creating the worktree fails, show the error and ask whether to retry with `--in-place`; don't fall back on your own, because that switches the human's checkout. If an `--in-place` run fails because the tree is dirty, stop and ask the human to commit or stash. Don't touch their changes.
+1. Pick a 2–5 word kebab-case slug from the input. Pipe the raw input into `STATE new <slug> -`. Add `--in-place` only if the human asked to work in their checkout. If creating the worktree fails, show the error and ask whether to retry with `--in-place`; don't fall back on your own, because that switches the human's checkout. If an `--in-place` run fails because the tree is dirty, stop and ask the human to commit or stash. Don't touch their changes. If it fails because the base branch is behind its upstream, show the message and ask the human to pull; don't pull for them. Pass on a `warning:` it prints in the same line as the run ID.
 2. Tell the human the run ID and the worktree path in one line. They can resume with `/factory <run-id>`. Uncommitted changes in their checkout are not part of the run, which starts from the last commit on `base_branch`; if `git status` there is dirty, say so in the same line.
 
 ## Step 2: Drive stages
