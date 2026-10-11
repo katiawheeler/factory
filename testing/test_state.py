@@ -131,6 +131,9 @@ class StateTest(unittest.TestCase):
         self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
         self.advance("land")
         self.assertIn("PR open for review", self.run_state("list").stdout)
+        self.advance("blocked", "land")
+        self.advance("implement", "blocked")
+        self.assertEqual(self.state()["stage"], "blocked")
 
     def test_pr_fix_rounds_loop_back_through_review_and_verify_to_ship(self):
         self.ship()

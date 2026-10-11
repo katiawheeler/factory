@@ -238,8 +238,11 @@ def cmd_advance(run_id, stage, note=""):
         die(f"run is {s['stage']}; it cannot advance")
     if stage == s["stage"]:
         die(f"run is already at '{stage}'; dispatch it without advancing")
-    if stage in ("done", "land") and (s["stage"] != "ship" or not s.get("pr_url")):
-        die(f"{stage} requires the ship stage and a recorded PR URL")
+    if stage == "done" and (s["stage"] != "ship" or not s.get("pr_url")):
+        die("done requires the ship stage and a recorded PR URL")
+    # A blocked run with an open PR goes back to following it without a fake ship.
+    if stage == "land" and (s["stage"] not in ("ship", "blocked") or not s.get("pr_url")):
+        die("land requires the ship stage (or blocked, back to an open PR) and a recorded PR URL")
     if stage in ("merged", "closed") and not s.get("pr_url"):
         die(f"{stage} requires a recorded PR URL")
     # Shipping needs the human's ship answer, except to push fixes to a PR they already approved.
