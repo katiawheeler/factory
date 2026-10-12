@@ -917,7 +917,7 @@ else:
         self.write("triage.md", self.TRIAGE)
         out = self.step()
         self.assertEqual((out["stage"], out["round"], out["did"]), ("spec", 1, ["triage → spec"]))
-        self.assertEqual(self.state()["input_summary"], "Fix the word count.")
+        self.assertEqual(self.state()["input_summary"], "do it")
         self.write("spec.md", self.spec(1))
         out = self.step()
         self.assertEqual((out["action"], out["kind"], out["choices"][0]), ("ask", "spec-approval", "approve"))

@@ -1629,7 +1629,7 @@ class Driver:
         before = self.s["stage"]
         out = advance_run(self.path, self.s, stage, note, human=human)
         entry = self.s["history"][-1]
-        self.did.append(f"{before} → {stage}" + (f": {entry['note']}" if entry["note"] else ""))
+        self.did.append(f"{before} → {stage}" + (f": {first_lines(entry['note'], 160)}" if entry["note"] else ""))
         self.warnings += out["warnings"]
         self.post = (out["post"] + ", then run the command it prints") if out["post"] else None
         self.entered = stage
@@ -1728,7 +1728,8 @@ class Driver:
         return self.result(
             "dispatch", f"Dispatch the {stage} stage as a subagent with `prompt`. If a named agent `factory-{stage}` "
             "exists in this session, use it and drop the prompt's first line; otherwise use a general-purpose "
-            "subagent. When it returns, run next again (add --tokens <n> if the harness reported its usage).",
+            "subagent, and wait for it to finish (don't run it in the background). When it returns, run next again "
+            "(add --tokens <n> if the harness reported its usage).",
             agent=f"factory-{stage}", round=rnd, prompt="\n".join(lines))
 
     def check_out_run_branch(self):
@@ -1773,10 +1774,11 @@ class Driver:
         self.advance(path_next(self.s, stage))
         return None
 
-    def summarize(self, triage=""):
+    def summarize(self):
+        """A one-line summary from the input as the human wrote it; the orchestrator may set a better one."""
         if self.s.get("input_summary"):
             return
-        source = section(triage, "Resolved input") or read(self.folder, "input.md")
+        source = read(self.folder, "input.md")
         line = next((x.strip("> ").strip() for x in source.splitlines() if x.strip("> ").strip()), "")
         self.s["input_summary"] = first_lines(line, 120)
         self.save()
@@ -1792,7 +1794,7 @@ class Driver:
         return getattr(self, "after_" + stage)(text, field(text, "Verdict"))
 
     def after_triage(self, text, verdict):
-        self.summarize(text)
+        self.summarize()
         source = GITHUB_URL.search(field(text, "Source") or "")
         if source and not self.s.get("thread_url"):
             self.s["thread_url"] = source.group(0)
@@ -1956,6 +1958,7 @@ class Driver:
                 "ask", f"The human asked to steer. Read {skill_dir() / 'guides' / 'steer.md'} and follow it, then "
                 "record the outcome with answer --to <stage>.", **common)
         latest = str(self.folder / OUTPUTS[entry["from"]]) if entry["from"] in OUTPUTS else None
+        common.pop("note")  # it's the question
         return self.result(
             "ask", f"A stage is blocked. Lead with its question, then read {skill_dir() / 'guides' / 'steer.md'} "
             "and follow it. The human's answer goes back with answer.", question=entry["note"],
