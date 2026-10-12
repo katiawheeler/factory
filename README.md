@@ -95,7 +95,7 @@ Any of `triage`, `spec`, `checkpoint-1`, `review`, `verify`, `checkpoint-2`, or 
 
 ![Architecture of a factory run. A human or CI job invokes the orchestrator, which dispatches stage agents and records every stage move through the state helper. The state helper reads the repo's factory.* settings and is the only writer of the run folder. Stage agents write their outputs to the run folder and commit in the run's worktree, which is pushed to a GitHub PR; CI results and reviews come back to the orchestrator, and checkpoints go back to the human.](docs/factory-architecture.svg)
 
-`state.py` is the only thing that writes run state: it refuses stage moves the loop doesn't make, applies the skip settings, and locks each run while changing it. See [Architecture](docs/architecture.md).
+`state.py` runs the loop. Its `next` command reads what each stage wrote and decides the next move, applying the loop caps, the skip settings, and spec auto-approval, so the orchestrator only dispatches what it's told and asks the human when it's told. It's also the only thing that writes run state, and it locks each run while changing it. See [Architecture](docs/architecture.md).
 
 ## Documentation
 

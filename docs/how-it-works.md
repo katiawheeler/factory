@@ -23,7 +23,7 @@ Review gets three consecutive attempts; verification gets three attempts between
 
 ## Run state
 
-`state.json` and its transitions are managed by [`state.py`](../.agents/skills/factory/scripts/state.py), which requires Python 3. It locks a run while changing it, so a scheduled resume, a GitHub answer, and a PR event arriving at once don't overwrite each other's changes (on Windows, which lacks the lock, keep one session per run). If shipping cannot push or open a PR, the run remains blocked for human steering and doesn't move on to land.
+`state.json` and its transitions are managed by [`state.py`](../.agents/skills/factory/scripts/state.py), which requires Python 3. Its `next` command decides every routine move from the stage outputs, so the loop caps, skips, and checkpoints above hold whatever the orchestrating agent does, and a resumed run picks up exactly where it stopped: a stage that never wrote its output is dispatched again. It locks a run while changing it, so a scheduled resume, a GitHub answer, and a PR event arriving at once don't overwrite each other's changes (on Windows, which lacks the lock, keep one session per run). If shipping cannot push or open a PR, the run remains blocked for human steering and doesn't move on to land.
 
 ## Worktrees
 

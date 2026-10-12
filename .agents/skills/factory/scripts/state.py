@@ -15,9 +15,17 @@ Usage:
   state.py list                          list runs with stage and summary
   state.py show <run-id>                 print state.json
   state.py get <run-id> <field>          print one field (dotted, e.g. rounds.review)
+  state.py next <run-id> [--tokens N [--usd X]]
+                                         the loop: read what the last dispatched stage wrote,
+                                         take every move the loop calls for, and print one JSON
+                                         instruction (dispatch, ship, ask, wait, finish); --tokens
+                                         records what the dispatched stage cost
+  state.py answer <run-id> [--to <stage>] [--from <source>] <answer|->
+                                         apply a human's answer at a checkpoint, a blocked stage or
+                                         land, then print the next instruction like `next`
   state.py advance <run-id> <stage> [note]
-                                         move to <stage>, log it, bump the round
-                                         counter for work stages; prints the round
+                                         move to <stage>, log it, bump the round counter for work
+                                         stages; prints the round. Refuses a loop past its cap
   state.py set <run-id> <field> <value>  set a top-level field (e.g. pr_url, report_url, thread_url)
   state.py feedback <run-id> <heading>   append stdin to feedback.md under "## <heading>"
   state.py check-verification <run-id>    validate criterion and suite results
@@ -44,6 +52,7 @@ Usage:
   state.py release <run-id>              remove a finished run's worktree (keeps the branch)
   state.py skips [<run-id>]              the stages skipped (factory.skip, plus the run's --skip), as JSON
 
+`next` and `answer` make every routine move; `advance` is left for escapes such as `blocked`.
 `advance` only takes the loop's own moves. `git config factory.skip <stages|all>` (every run) or
 `new --skip <stages|all>` (one run) lets runs jump over triage, spec, checkpoint-1, review, verify and
 checkpoint-2; implement, ship and land are never skipped.
@@ -52,6 +61,7 @@ Entering checkpoint-1, checkpoint-2, blocked, land, merged or closed runs the no
 if one is set in $FACTORY_NOTIFY or `git config factory.notify`, with the event JSON on stdin.
 """
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -81,7 +91,8 @@ HUMAN_STAGES = {"checkpoint-1", "checkpoint-2", "blocked"}
 TERMINAL = {"merged", "closed", "done", "aborted"}
 NOTIFY_STAGES = HUMAN_STAGES | {"land", "merged", "closed", "done"}
 SETTABLE = ("input_summary", "pr_url", "report_url", "thread_url")
-CAP_NOTES = ("review did not converge", "verify did not pass", "PR feedback did not converge")
+CAP_NOTE = {"review": "review did not converge", "verify": "verify did not pass", "land": "PR feedback did not converge"}
+CAP_NOTES = tuple(CAP_NOTE.values())
 # The road from input to PR. factory.skip and --skip may jump over any of these but implement and ship.
 PATH = ["triage", "spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2", "ship"]
 SKIPPABLE = ("triage", "spec", "checkpoint-1", "review", "verify", "checkpoint-2")
@@ -351,7 +362,25 @@ def skipped_between(s, stage):
     if here not in PATH or stage not in PATH or PATH.index(stage) <= PATH.index(here) + 1:
         return None
     between = PATH[PATH.index(here) + 1:PATH.index(stage)]
+    if stage == "ship" and s.get("pr_url"):
+        # A PR fix round ships to a PR the human already approved, so ship approval isn't a skip there.
+        between = [x for x in between if x != "checkpoint-2"]
+        if not between:
+            return None
     return between if set(between) <= skip_setting(s) else None
+
+
+def path_next(s, here):
+    """The next stage after `here` on the road to a PR that this run doesn't skip.
+
+    In a PR fix round (the run has a PR) verified work goes straight back to ship, not to ship approval.
+    """
+    skips = skip_setting(s)
+    for stage in PATH[PATH.index(here) + 1:]:
+        if stage in skips or (stage == "checkpoint-2" and s.get("pr_url")):
+            continue
+        return stage
+    return "ship"
 
 
 def run_skips(s):
@@ -376,34 +405,70 @@ def unshippable(folder, s):
     return ""
 
 
+class Refused(Exception):
+    """A move or answer the loop doesn't allow. The message says what the run can do instead."""
+
+
+class NeedsStage(Refused):
+    """An answer that is valid, but needs the caller to say which stage it sends the run to (--to)."""
+
+
 def cmd_advance(run_id, stage, note=""):
-    if stage not in STAGES:
-        die(f"unknown stage '{stage}'; valid: {', '.join(STAGES)}")
     path, s = load(run_id)
+    try:
+        out = advance_run(path, s, stage, note)
+    except Refused as exc:
+        die(str(exc))
+    for line in out["lines"]:
+        print(line)
+    for warning in out["warnings"]:
+        print(f"warning: {warning}", file=sys.stderr)
+    if out["post"]:
+        print(f"post this checkpoint on GitHub: {out['post']}, then run the command it prints")
+
+
+def advance_run(path, s, stage, note="", human=False):
+    """Move the run to `stage`, log it, and save. Raises Refused for a move the loop doesn't make.
+
+    `human` marks a move a person asked for (an answer), which may start a PR fix round past the cap.
+    Returns the lines to print, warnings, and the checkpoint-post command when the move should be posted.
+    """
+    if stage not in STAGES:
+        raise Refused(f"unknown stage '{stage}'; valid: {', '.join(STAGES)}")
     if s["stage"] in TERMINAL:
-        die(f"run is {s['stage']}; it cannot advance")
+        raise Refused(f"run is {s['stage']}; it cannot advance")
     if stage == s["stage"]:
-        die(f"run is already at '{stage}'; dispatch it without advancing")
+        raise Refused(f"run is already at '{stage}'; dispatch it without advancing")
     jumped = skipped_between(s, stage)
     if jumped is None and stage not in MOVES[s["stage"]] | {"blocked", "aborted"}:
         allowed = ", ".join(sorted(MOVES[s["stage"]] | {"blocked", "aborted"}))
-        die(f"a run at '{s['stage']}' cannot move to '{stage}'; it can go to: {allowed}. "
-            "Skipping stages needs `--skip` when the run starts, or `git config factory.skip`")
+        raise Refused(f"a run at '{s['stage']}' cannot move to '{stage}'; it can go to: {allowed}. "
+                      "Skipping stages needs `--skip` when the run starts, or `git config factory.skip`")
     if stage == "done" and not s.get("pr_url"):
-        die("done requires the ship stage and a recorded PR URL")
+        raise Refused("done requires the ship stage and a recorded PR URL")
     # A blocked run with an open PR goes back to following it without a fake ship.
     if stage == "land" and not s.get("pr_url"):
-        die("land requires the ship stage (or blocked, back to an open PR) and a recorded PR URL")
+        raise Refused("land requires the ship stage (or blocked, back to an open PR) and a recorded PR URL")
     if stage in ("merged", "closed") and not s.get("pr_url"):
-        die(f"{stage} requires a recorded PR URL")
+        raise Refused(f"{stage} requires a recorded PR URL")
     # Shipping needs the human's ship answer, except to push fixes to a PR they already approved,
     # or when the repo skips ship approval and the work passed every check it didn't skip.
     if stage == "ship" and s["stage"] == "verify" and not s.get("pr_url") and not jumped:
-        die("ship comes after checkpoint-2, or after verify when pushing fixes to an open PR")
+        raise Refused("ship comes after checkpoint-2, or after verify when pushing fixes to an open PR")
     if jumped and stage == "ship" and not s.get("pr_url"):
         failing = unshippable(path.parent, s)
         if failing:
-            die(f"ship approval is skipped, but this work can't ship without a human: {failing}")
+            raise Refused(f"ship approval is skipped, but this work can't ship without a human: {failing}")
+    loop = s.setdefault("loop", {k: 0 for k in sorted(ROUND_CAP)})
+    loop.setdefault("land", 0)
+    # Loop caps are enforced here, not left to the caller: a capped loop goes to a human.
+    if stage == "implement" and not human:
+        if s["stage"] in ROUND_CAP and loop.get(s["stage"], 0) >= ROUND_CAP[s["stage"]]:
+            raise Refused(f"{s['stage']} has used all {ROUND_CAP[s['stage']]} attempts; go to checkpoint-2 "
+                          f"with the note '{CAP_NOTE[s['stage']]}'")
+        if s["stage"] == "land" and loop["land"] >= LAND_CAP:
+            raise Refused(f"the PR has had all {LAND_CAP} fix rounds; go to checkpoint-2 "
+                          f"with the note '{CAP_NOTE['land']}'")
     # A skipped triage or spec is left without writing its output file.
     left = s["stage"] in ("triage", "spec") and s["stage"] in skip_setting(s) \
         and not (path.parent / f"{s['stage']}.md").exists()
@@ -414,10 +479,8 @@ def cmd_advance(run_id, stage, note=""):
         # Skipping spec approval is the repo's explicit choice, checked here rather than trusted to the caller.
         decision = spec_policy(path.parent, s)
         if decision["reasons"]:
-            die("the spec needs human approval at checkpoint-1: " + "; ".join(decision["reasons"]))
+            raise Refused("the spec needs human approval at checkpoint-1: " + "; ".join(decision["reasons"]))
         note = f"spec auto-approved by policy (size {decision['size']}, type {decision['type']})"
-    loop = s.setdefault("loop", {k: 0 for k in sorted(ROUND_CAP)})
-    loop.setdefault("land", 0)
     s["rounds"].setdefault("land", 0)
     if stage in WORK_STAGES:
         s["rounds"][stage] += 1
@@ -437,31 +500,35 @@ def cmd_advance(run_id, stage, note=""):
         entry["skipped"] = skipped
     s["history"].append(entry)
     s["stage"] = stage
+    s.pop("dispatched", None)
     save(path, s)
+    lines, warnings, post = [], [], None
     if stage in ROUND_CAP:
         n, cap = loop[stage], ROUND_CAP[stage]
         last = "  LAST ATTEMPT: if this one fails, escalate to checkpoint-2" if n >= cap else ""
-        print(f"{stage} round {s['rounds'][stage]} (attempt {n} of {cap}){last}")
+        lines.append(f"{stage} round {s['rounds'][stage]} (attempt {n} of {cap}){last}")
     elif pr_fix:
         n = loop["land"]
         last = "  LAST ATTEMPT: if the PR still needs fixes after this, escalate to checkpoint-2" if n >= LAND_CAP else ""
-        print(f"implement round {s['rounds']['implement']} (PR fix {n} of {LAND_CAP}){last}")
+        lines.append(f"implement round {s['rounds']['implement']} (PR fix {n} of {LAND_CAP}){last}")
     elif stage in WORK_STAGES:
-        print(f"{stage} round {s['rounds'][stage]}")
+        lines.append(f"{stage} round {s['rounds'][stage]}")
     else:
-        print(stage)
+        lines.append(stage)
     if stage in NOTIFY_STAGES:
-        notify(path.parent, s)
+        warning = notify(path.parent, s)
+        if warning:
+            warnings.append(warning)
     if stage in HUMAN_STAGES and (s.get("pr_url") or (s.get("thread_url") and posting_enabled())):
-        print(f"post this checkpoint on GitHub: python3 {Path(__file__).resolve()} checkpoint-post {s['id']}, "
-              "then run the command it prints")
+        post = f"python3 {Path(__file__).resolve()} checkpoint-post {s['id']}"
+    return {"lines": lines, "warnings": warnings, "post": post}
 
 
 def notify(folder, s):
-    """Tell the human a run needs them. A failed notification never fails the advance."""
+    """Tell the human a run needs them. Returns a warning when it fails, which never fails the advance."""
     cmd = os.environ.get("FACTORY_NOTIFY") or git("config", "--get", "factory.notify").stdout.strip()
     if not cmd:
-        return
+        return None
     last = s["history"][-1]
     if s["stage"] == "done" or (s["stage"] == "land" and not s["rounds"].get("land")):
         message = f"factory {s['id']}: PR opened {s.get('pr_url')}"
@@ -488,10 +555,10 @@ def notify(folder, s):
         r = subprocess.run(cmd, shell=True, input=json.dumps(event), env=env, cwd=main_root(),
                            capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
-        print("warning: notify command timed out after 30s", file=sys.stderr)
-        return
+        return "notify command timed out after 30s"
     if r.returncode != 0:
-        print(f"warning: notify command exited {r.returncode}: {r.stderr.strip()[:200]}", file=sys.stderr)
+        return f"notify command exited {r.returncode}: {r.stderr.strip()[:200]}"
+    return None
 
 
 def cmd_set(run_id, field, value):
@@ -950,9 +1017,14 @@ def cmd_inbox(run_id):
     factory.approvers) can answer a checkpoint; everyone else's /factory comment is ignored.
     """
     _, s = load(run_id)
-    urls = list(dict.fromkeys(u for u in (s.get("thread_url"), s.get("pr_url")) if u))
-    if not urls:
+    if not (s.get("thread_url") or s.get("pr_url")):
         die("no thread_url or pr_url recorded for this run")
+    print(json.dumps(inbox(s), indent=2))
+
+
+def inbox(s):
+    """The comments `cmd_inbox` prints, as a dict. Dies (SystemExit) when gh fails."""
+    urls = list(dict.fromkeys(u for u in (s.get("thread_url"), s.get("pr_url")) if u))
     since, trust = inbox_since(s), Trust()
     answers, feedback, ignored = [], [], []
     for url in urls:
@@ -971,8 +1043,8 @@ def cmd_inbox(run_id):
             elif url == s.get("pr_url"):
                 feedback.append({**item, "trusted": trusted})
     key = lambda e: e["at"]
-    print(json.dumps({"since": since, "threads": urls, "answers": sorted(answers, key=key),
-                      "feedback": sorted(feedback, key=key), "ignored": sorted(ignored, key=key)}, indent=2))
+    return {"since": since, "threads": urls, "answers": sorted(answers, key=key),
+            "feedback": sorted(feedback, key=key), "ignored": sorted(ignored, key=key)}
 
 
 def command_answer(text):
@@ -1175,19 +1247,30 @@ def read_learnings(path):
 
 def cmd_learn(run_id):
     """Fold a finished run's retro into the shared learnings file, so later runs start from it."""
-    with locked(learnings_path().with_suffix(".lock")):
-        learn(run_id)
-
-
-def learn(run_id):
     path, s = load(run_id)
+    try:
+        message, warning = learn_run(path, s)
+    except Refused as exc:
+        die(str(exc))
+    print(message)
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr)
+
+
+def learn_run(path, s):
+    """Merge the run's retro into learnings.md. Returns (message, warning or None); raises Refused."""
+    with locked(learnings_path().with_suffix(".lock")):
+        return learn(path, s)
+
+
+def learn(path, s):
     if s["stage"] not in TERMINAL:
-        die(f"run is at '{s['stage']}'; learn from a merged, closed, done or aborted run")
+        raise Refused(f"run is at '{s['stage']}'; learn from a merged, closed, done or aborted run")
     if s.get("learned_at"):
-        die(f"already learned from this run at {s['learned_at']}")
+        raise Refused(f"already learned from this run at {s['learned_at']}")
     retro = read(path.parent, "retro.md")
     if not retro:
-        die("no retro.md in the run folder; run the retro stage first")
+        raise Refused("no retro.md in the run folder; run the retro stage first")
     items = re.findall(r"^- \[([A-Za-z]+)\] +(.+?)\s*$", section(retro, "Learnings"), re.MULTILINE)
     target = learnings_path()
     cats = read_learnings(target)
@@ -1215,10 +1298,9 @@ def learn(run_id):
     s["learned_at"] = now()
     save(path, s)
     total = sum(len(v) for v in cats.values())
-    print(f"added {added}, retired {retired}, skipped {duplicates} duplicates; {total} learnings in {target}")
-    if total > LEARNINGS_CAP:
-        print(f"warning: {total} learnings is more than {LEARNINGS_CAP}; the next retro should retire stale ones",
-              file=sys.stderr)
+    warning = (f"{total} learnings is more than {LEARNINGS_CAP}; the next retro should retire stale ones"
+               if total > LEARNINGS_CAP else None)
+    return f"added {added}, retired {retired}, skipped {duplicates} duplicates; {total} learnings in {target}", warning
 
 
 def merged_at(s):
@@ -1459,21 +1541,640 @@ def cmd_stats(run_id=None, as_json=False):
 
 def cmd_release(run_id):
     """Remove the run's worktree once the branch is pushed or the run is abandoned."""
-    path, s = load(run_id)
+    _, s = load(run_id)
+    try:
+        print(release_run(s))
+    except Refused as exc:
+        die(str(exc))
+
+
+def release_run(s):
     wt = s.get("worktree")
     if not wt:
-        print("run uses the main checkout; nothing to release")
-        return
+        return "run uses the main checkout; nothing to release"
     if s["stage"] not in TERMINAL:
-        die(f"run is at '{s['stage']}'; release only a merged, closed, done or aborted run")
+        raise Refused(f"run is at '{s['stage']}'; release only a merged, closed, done or aborted run")
     if not Path(wt).exists():
         git("worktree", "prune")
-        print(f"worktree {wt} already removed")
-        return
+        return f"worktree {wt} already removed"
     r = subprocess.run(["git", "worktree", "remove", wt], cwd=main_root(), capture_output=True, text=True)
     if r.returncode != 0:
-        die(f"could not remove worktree {wt}: {r.stderr.strip()}; commit, stash or delete its changes first")
-    print(f"removed worktree {wt}; branch {s['branch']} is kept")
+        raise Refused(f"could not remove worktree {wt}: {r.stderr.strip()}; commit, stash or delete its changes first")
+    return f"removed worktree {wt}; branch {s['branch']} is kept"
+
+
+# The loop itself. `next` reads what the last stage wrote, takes every move the loop dictates, and prints
+# one instruction; `answer` applies a human's answer the same way. The orchestrator does what it's told:
+# dispatch a stage, ship, ask a human, or stop. Judgment (what feedback means, presenting a checkpoint,
+# steering) stays with the orchestrator; routing doesn't.
+
+OUTPUTS = {"triage": "triage.md", "spec": "spec.md", "implement": "implementation.md", "review": "review.md",
+           "verify": "verification.md", "land": "land.md", "retro": "retro.md"}
+# Dispatches of one stage round that may come back without a usable output before the run goes to a human.
+DISPATCH_LIMIT = 3
+VERDICTS = {"triage": ("proceed", "needs-human", "reject"), "review": ("approve", "changes-requested"),
+            "land": ("merged", "closed", "fix", "wait", "needs-human", "abort")}
+
+
+def skill_dir():
+    return Path(__file__).resolve().parent.parent
+
+
+def fingerprint(p):
+    """What a file looked like when a stage was dispatched, so a rewrite (even with the same text) counts."""
+    if not p.exists():
+        return None, None
+    return p.stat().st_mtime_ns, hashlib.sha1(p.read_bytes()).hexdigest()
+
+
+def field(text, name):
+    m = re.search(rf"^{name}: *(\S+)", text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def first_lines(text, limit=500):
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def checkpoint_kind(s):
+    """What a human stop is asking for, from the note it was entered with."""
+    note = s["history"][-1]["note"] or ""
+    if s["stage"] == "checkpoint-1":
+        if note.startswith("triage questions"):
+            return "triage-questions"
+        return "triage-rejected" if note.startswith("triage rejected") else "spec-approval"
+    if s["stage"] == "blocked":
+        return "steer" if note.startswith("steer requested") else "blocked"
+    return "ship-approval"
+
+
+class Driver:
+    def __init__(self, path, s):
+        self.path, self.s, self.folder = path, s, path.parent
+        self.did, self.tell, self.warnings = [], [], []
+        self.post = self.entered = self.github_note = None
+        self.state_cmd = f"python3 {Path(__file__).resolve()}"
+
+    # -- bookkeeping ---------------------------------------------------------------------------------------
+
+    def save(self):
+        save(self.path, self.s)
+
+    def git(self, *args):
+        """git in the run's repo: its worktree, or the human's checkout for an in-place run."""
+        return subprocess.run(["git", "-C", self.s["repo"], *args], capture_output=True, text=True)
+
+    def advance(self, stage, note="", human=False):
+        before = self.s["stage"]
+        out = advance_run(self.path, self.s, stage, note, human=human)
+        entry = self.s["history"][-1]
+        self.did.append(f"{before} → {stage}" + (f": {entry['note']}" if entry["note"] else ""))
+        self.warnings += out["warnings"]
+        self.post = (out["post"] + ", then run the command it prints") if out["post"] else None
+        self.entered = stage
+
+    def feedback(self, heading, text):
+        with (self.folder / "feedback.md").open("a") as f:
+            f.write(f"## {heading}\n{text.strip()}\n\n")
+
+    def result(self, action, instruction, **fields):
+        out = {"run": self.s["id"], "stage": self.s["stage"], "action": action, "instruction": instruction}
+        out.update({k: v for k, v in fields.items() if v not in (None, "", [])})
+        if self.post and self.s["stage"] in HUMAN_STAGES:
+            out["post_on_github"] = self.post
+        for key in ("did", "tell", "warnings"):
+            if getattr(self, key):
+                out[key] = getattr(self, key)
+        return out
+
+    def record_usage(self, tokens, usd):
+        d = self.s.get("dispatched")
+        if not d:
+            self.warnings.append("no stage was dispatched, so --tokens was not recorded")
+            return
+        self.s.setdefault("usage", []).append({"at": now(), "stage": d["stage"], "round": d["round"],
+                                               "tokens": tokens, "usd": usd})
+        self.save()
+
+    # -- the loop ------------------------------------------------------------------------------------------
+
+    def run(self):
+        for _ in range(20):
+            out = self.step()
+            if out:
+                return out
+        raise Refused("the run kept moving without stopping; check its state.json history")
+
+    def step(self):
+        st = self.s["stage"]
+        if st in TERMINAL:
+            return self.finish()
+        if st in HUMAN_STAGES:
+            return self.human()
+        if st == "ship":
+            return self.ship()
+        if st in ("triage", "spec") and st in skip_setting(self.s):
+            return self.skip(st)
+        d = self.s.get("dispatched")
+        if d and d["stage"] == st:
+            return self.consume(st) if self.fresh(d) else self.dispatch(st, again=True)
+        return self.dispatch(st)
+
+    def round_for(self, stage):
+        if stage == "land":
+            return self.s["rounds"].get("land", 0) + 1
+        return max(1, self.s["rounds"].get(stage, 0))
+
+    def fresh(self, d):
+        """Whether the dispatched stage wrote its output: changed since the dispatch, for this round."""
+        p = self.folder / OUTPUTS[d["stage"]]
+        if not p.exists() or list(fingerprint(p)) == [d.get("mtime"), d.get("sha")]:
+            return False
+        r = field(p.read_text(), "Round")
+        return r is None or r == str(d["round"])
+
+    def dispatch(self, stage, again=False, fix=None):
+        old = self.s.get("dispatched") if (again or fix) else None
+        n = (old or {}).get("dispatches", 0) + 1
+        out = OUTPUTS[stage]
+        if n > DISPATCH_LIMIT:
+            return self.give_up(stage, f"{stage} wrote no usable {out} in {DISPATCH_LIMIT} dispatches")
+        if stage == "implement" and not self.s.get("worktree"):
+            problem = self.check_out_run_branch()
+            if problem:
+                self.advance("blocked", problem)
+                return None
+        rnd = self.round_for(stage)
+        mtime, sha = fingerprint(self.folder / out)
+        self.s["dispatched"] = {"stage": stage, "round": rnd, "at": now(), "dispatches": n,
+                                "fixes": (old or {}).get("fixes", 0), "mtime": mtime, "sha": sha}
+        self.save()
+        if again and not fix:
+            self.tell.append(f"{stage} round {rnd} didn't finish (no new {out}), so it is dispatched again")
+        lines = [
+            f"Instructions: read {skill_dir() / 'stages' / (stage + '.md')} and follow it.",
+            f"Run folder: {self.folder}",
+            f"Repository: {self.s['repo']}. This is the target repo. cd into it for every git, test, and run command.",
+            f"Round: {rnd}",
+            f"STATE: {self.state_cmd}",
+            f"Learnings: {learnings_path()}. Read it first if it exists: it's what earlier runs learned about this "
+            "repo. It's background; the spec, feedback, and your instructions win.",
+            "Read your inputs from the run folder, write your output file there, and return a summary of at most "
+            "10 lines.",
+        ]
+        if fix:
+            lines.append(f"Fix from the orchestrator: your last {out} can't be used: {fix}")
+        return self.result(
+            "dispatch", f"Dispatch the {stage} stage as a subagent with `prompt`. If a named agent `factory-{stage}` "
+            "exists in this session, use it and drop the prompt's first line; otherwise use a general-purpose "
+            "subagent. When it returns, run next again (add --tokens <n> if the harness reported its usage).",
+            agent=f"factory-{stage}", round=rnd, prompt="\n".join(lines))
+
+    def check_out_run_branch(self):
+        """An in-place run works in the human's checkout, so implement needs the run branch there."""
+        branch, base = self.s["branch"], self.s["base_branch"]
+        if self.git("branch", "--show-current").stdout.strip() == branch:
+            return None
+        exists = self.git("rev-parse", "-q", "--verify", f"refs/heads/{branch}").returncode == 0
+        r = self.git("switch", branch) if exists else self.git("switch", "-c", branch, base)
+        if r.returncode != 0:
+            return f"couldn't switch to {branch}: {r.stderr.strip()[:200]}"
+        self.did.append(f"switched the checkout to {branch}")
+        return None
+
+    def fix(self, stage, problem):
+        """Send a stage back once to correct an output that can't be read; after that, a human looks."""
+        d = self.s["dispatched"]
+        if d.get("fixes", 0) >= 1:
+            what = "verification report invalid" if stage == "verify" else f"{OUTPUTS[stage]} invalid"
+            return self.give_up(stage, f"{what}: {problem}")
+        d["fixes"] = d.get("fixes", 0) + 1
+        return self.dispatch(stage, fix=problem)
+
+    def give_up(self, stage, reason):
+        if stage == "retro":
+            self.warnings.append(f"no retro for this run: {reason}")
+            self.s["retro_skipped"] = reason
+            self.s.pop("dispatched", None)
+            self.save()
+            return None
+        self.advance("blocked", reason)
+        return None
+
+    def skip(self, stage):
+        """A run at a skipped triage or spec goes on without it."""
+        if stage == "triage":
+            self.summarize()
+            m = GITHUB_URL.search(read(self.folder, "input.md"))
+            if m and not self.s.get("thread_url"):
+                self.s["thread_url"] = m.group(0)
+                self.save()
+        self.advance(path_next(self.s, stage))
+        return None
+
+    def summarize(self, triage=""):
+        if self.s.get("input_summary"):
+            return
+        source = section(triage, "Resolved input") or read(self.folder, "input.md")
+        line = next((x.strip("> ").strip() for x in source.splitlines() if x.strip("> ").strip()), "")
+        self.s["input_summary"] = first_lines(line, 120)
+        self.save()
+
+    # -- reading what a stage wrote ------------------------------------------------------------------------
+
+    def consume(self, stage):
+        text = read(self.folder, OUTPUTS[stage])
+        if stage in VERDICTS:
+            verdict = field(text, "Verdict")
+            if verdict not in VERDICTS[stage]:
+                return self.fix(stage, f"it needs exactly one `Verdict: {' | '.join(VERDICTS[stage])}` line")
+        return getattr(self, "after_" + stage)(text, field(text, "Verdict"))
+
+    def after_triage(self, text, verdict):
+        self.summarize(text)
+        source = GITHUB_URL.search(field(text, "Source") or "")
+        if source and not self.s.get("thread_url"):
+            self.s["thread_url"] = source.group(0)
+            self.save()
+        if verdict == "proceed":
+            self.advance(path_next(self.s, "triage"))
+        else:
+            self.advance("checkpoint-1", "triage questions" if verdict == "needs-human" else "triage rejected")
+
+    def after_spec(self, text, _):
+        if not spec_criteria(text):
+            return self.fix("spec", "it has no acceptance criteria (`- [ ] AC1: ... **Verify by:** ...`)")
+        spec = self.folder / "spec.md"
+        if "checkpoint-1" in skip_setting(self.s):
+            self.advance("implement")
+            self.tell.append(f"No human reviewed the spec: checkpoint-1 is skipped ({skip_source(self.s, ['checkpoint-1'])}). "
+                             f"Spec: {spec}")
+            return None
+        policy = spec_policy(self.folder, self.s)
+        if policy["auto_approve_spec"]:
+            self.advance("implement")
+            self.tell.append(f"The spec was auto-approved by the repo's policy (size {policy['size']}, type "
+                             f"{policy['type']}); no human reviewed it. Spec: {spec}")
+        else:
+            self.advance("checkpoint-1")
+
+    def after_implement(self, text, _):
+        status = field(text, "Status")
+        if status not in ("done", "blocked"):
+            return self.fix("implement", "it needs a `Status: done | blocked` line")
+        if status == "blocked":
+            self.advance("blocked", first_lines(section(text, "Blocked on")) or "implement is blocked")
+            return None
+        leaked = self.git("diff", "--name-only", f"{self.s['base_branch']}...{self.s['branch']}",
+                          "--", ".factory").stdout.split()
+        if leaked:
+            return self.fix("implement", f"run files leaked into the branch ({', '.join(leaked[:5])}); remove them "
+                            "with `git rm -r --cached .factory`, commit, and never commit .factory/")
+        self.advance(path_next(self.s, "implement"))
+
+    def after_review(self, _, verdict):
+        if verdict == "approve":
+            self.advance(path_next(self.s, "review"))
+        elif self.s["loop"]["review"] < ROUND_CAP["review"]:
+            self.advance("implement", "review changes")
+        else:
+            self.advance("checkpoint-2", CAP_NOTE["review"])
+
+    def after_verify(self, *_):
+        try:
+            verdict, suite, found = verification_results(self.folder, self.s)
+        except Invalid as exc:
+            return self.fix("verify", f"correct verification.md: {exc}")
+        if verdict == "pass":
+            target = path_next(self.s, "verify")
+            note = "" if target != "ship" else "PR fixes" if self.s.get("pr_url") else "ship approval skipped"
+            self.advance(target, note)
+            return None
+        failed = suite == "fail" or "failed" in found.values()
+        unverifiable = [k for k, r in found.items() if r == "unverifiable"] + (["suite"] if suite == "unverifiable" else [])
+        if not failed and unverifiable:
+            self.advance("checkpoint-2", f"unverifiable: {', '.join(unverifiable)}")
+        elif self.s["loop"]["verify"] < ROUND_CAP["verify"]:
+            self.advance("implement", "verify failed")
+        else:
+            self.advance("checkpoint-2", CAP_NOTE["verify"])
+
+    def after_land(self, text, verdict):
+        if verdict in ("merged", "closed"):
+            self.advance(verdict)
+        elif verdict == "abort":
+            self.advance("aborted", "aborted on the PR")
+            self.tell.append("The PR stays open; close it yourself if you don't want it.")
+        elif verdict == "fix":
+            if self.s["loop"]["land"] < LAND_CAP:
+                self.advance("implement", "PR feedback")
+            else:
+                self.advance("checkpoint-2", CAP_NOTE["land"])
+        elif verdict == "needs-human":
+            self.advance("blocked", first_lines(section(text, "Needs a human")) or "land needs a human decision")
+        else:  # wait: comments so far are read, and the next `next` checks the PR again
+            self.s["inbox_seen"] = now()
+            self.s.pop("dispatched", None)
+            self.save()
+            return self.result(
+                "wait", "Nothing to do until reviewers or CI act. Stop with the run at land and tell the human in one "
+                "line what it's waiting on, and that `<factory> <run-id>` checks the PR again. If the harness can "
+                "deliver PR events to this session, subscribe to the PR and run next on each event. Never poll or sleep.",
+                pr_url=self.s.get("pr_url"), waiting_on=first_lines(section(text, "Waiting on")))
+
+    # -- ship ----------------------------------------------------------------------------------------------
+
+    def pushed(self):
+        """True when the run branch's head is on its remote, False when it isn't, None when that's unknown."""
+        branch = self.s["branch"]
+        rev = lambda ref: self.git("rev-parse", "-q", "--verify", ref).stdout.strip()
+        upstream = self.git("for-each-ref", "--format=%(upstream)", f"refs/heads/{branch}").stdout.strip()
+        remote = rev(upstream) if upstream else rev(f"refs/remotes/origin/{branch}")
+        return None if not remote else remote == rev(branch)
+
+    def ship(self):
+        fix_round = bool(self.s.get("report_url")) and self.s["rounds"].get("land", 0) > 0
+        unfinished = None
+        if (self.s.get("dispatched") or {}).get("stage") == "ship":
+            pushed = self.pushed() if self.s.get("pr_url") else False
+            if self.s.get("pr_url") and pushed is not False:
+                if pushed is None:
+                    self.warnings.append("couldn't confirm the run branch was pushed (no remote-tracking branch); "
+                                         "taking the recorded pr_url as shipped")
+                self.advance("land", "pushed PR fixes" if fix_round else "PR opened")
+                return None
+            unfinished = ("no pr_url is recorded yet" if not self.s.get("pr_url")
+                          else "the run branch has commits that aren't on the remote yet")
+        self.s["dispatched"] = {"stage": "ship", "round": self.s["rounds"].get("land", 0), "at": now()}
+        self.save()
+        kind = "PR fix round (push to the open PR)" if fix_round else "first ship (open the PR)"
+        return self.result(
+            "ship", f"Read {skill_dir() / 'guides' / 'ship.md'} and follow it for a {kind}. When the branch is "
+            "pushed and pr_url is recorded, run next.", kind="fix-round" if fix_round else "first",
+            unfinished=unfinished)
+
+    # -- human stops ---------------------------------------------------------------------------------------
+
+    def human(self):
+        out = self.github()
+        if out is not False:
+            return out
+        s, kind = self.s, checkpoint_kind(self.s)
+        entry, cmd = s["history"][-1], f"{self.state_cmd} answer {s['id']}"
+        common = {"kind": kind, "note": entry["note"], "answer": f"{cmd} <answer>  (feedback text on stdin: "
+                  f"{cmd} - <<'EOF' ... EOF)"}
+        if self.github_note:
+            common["check_github"] = self.github_note
+        triage = read(self.folder, "triage.md")
+        if kind == "triage-questions":
+            return self.result(
+                "ask", "Show triage's open questions and their suggested defaults, then ask. `approve` means use the "
+                "defaults; any other text answers the questions; the run goes on to spec either way.",
+                triage=str(self.folder / "triage.md"), open_questions=section(triage, "Open questions"),
+                choices=["approve", "steer", "pause", "abort"], **common)
+        if kind == "triage-rejected":
+            return self.result(
+                "ask", "Show triage's reason and suggested split, then ask. `abort` ends the run; any other text "
+                "overrides triage and goes on to spec.", triage=str(self.folder / "triage.md"),
+                reason=section(triage, "Reason"), choices=["abort", "steer", "pause"], **common)
+        if kind == "spec-approval":
+            return self.result(
+                "ask", "Print spec.md's complete contents verbatim, then its path, and say the human can edit it "
+                "before approving. Then ask. Any text other than the choices is a revision request.",
+                spec=str(self.folder / "spec.md"), choices=["approve", "steer", "pause", "abort"], **common)
+        if kind == "ship-approval":
+            return self.result(
+                "ask", "Present the ship decision: the note if there is one, the diff stat and commits, the review "
+                "verdict and any non-blocking notes that affect risk, the verification results, each UI criterion's "
+                "replay command and video, and any loop cap hit, stated plainly. Then ask. Feedback goes back to a "
+                "stage you choose: answer with --to spec (requirements wrong), implement (code wrong or missing), "
+                "or verify (evidence insufficient), and say which and why in one line.",
+                choices=["ship", "steer", "pause", "abort"], **common, **self.ship_details())
+        if kind == "steer":
+            return self.result(
+                "ask", f"The human asked to steer. Read {skill_dir() / 'guides' / 'steer.md'} and follow it, then "
+                "record the outcome with answer --to <stage>.", **common)
+        latest = str(self.folder / OUTPUTS[entry["from"]]) if entry["from"] in OUTPUTS else None
+        return self.result(
+            "ask", f"A stage is blocked. Lead with its question, then read {skill_dir() / 'guides' / 'steer.md'} "
+            "and follow it. The human's answer goes back with answer.", question=entry["note"],
+            raised_by=entry["from"], output=latest, **common)
+
+    def ship_details(self):
+        s = self.s
+        span = f"{s['base_branch']}...{s['branch']}"
+        git_out = lambda *a: self.git(*a).stdout.strip()
+        details = {"diff_stat": git_out("diff", "--stat", span),
+                   "commits": git_out("log", "--oneline", f"{s['base_branch']}..{s['branch']}"),
+                   "review": field(read(self.folder, "review.md"), "Verdict"),
+                   "review_file": str(self.folder / "review.md"),
+                   "verification_file": str(self.folder / "verification.md")}
+        try:
+            verdict, suite, found = verification_results(self.folder, s)
+            details["verification"] = {"verdict": verdict, "suite": suite, "results": found}
+        except Invalid as exc:
+            details["verification"] = f"invalid: {exc}"
+        replays = re.findall(r"^(Replay|Video): *(.+)$", read(self.folder, "verification.md"), re.MULTILINE)
+        details["replay"] = [f"{k}: {v}" for k, v in replays]
+        approval = spec_approval(s)
+        if approval and not approval.startswith("approved by a human"):
+            details["spec_approval"] = f"Spec: {approval}"
+        return details
+
+    def github(self):
+        """Read /factory answers on the run's issue or PR, and apply the latest trusted one.
+
+        Returns False to go on asking, None when an answer moved the run, or an instruction.
+        """
+        self.github_note = None
+        s = self.s
+        if not (s.get("thread_url") or s.get("pr_url")) or self.entered == s["stage"]:
+            return False
+        if not shutil.which("gh"):
+            self.github_note = ("gh isn't installed: read new `/factory` comments on " + ", ".join(
+                u for u in (s.get("thread_url"), s.get("pr_url")) if u) + " with your GitHub tooling. Only people "
+                "with write access (or in factory.approvers) count; apply the latest with answer --from.")
+            return False
+        try:
+            box = inbox(s)
+        except SystemExit:
+            self.warnings.append("couldn't read GitHub for answers; ask locally")
+            return False
+        for item in box["ignored"]:
+            self.tell.append(f"Ignored `/factory` comment from @{item['author']} ({item['reason']}): {item['url']}")
+        if not box["answers"]:
+            if box["ignored"]:
+                s["inbox_seen"] = now()
+                self.save()
+            return False
+        latest = box["answers"][-1]
+        for earlier in box["answers"][:-1]:
+            self.tell.append(f"Not used: an earlier answer from @{earlier['author']}: {earlier['url']}")
+        source = f"@{latest['author']} on GitHub: {latest['url']}"
+        moves, outcome = len(s["history"]), None
+        try:
+            outcome = self.answer(latest["answer"], source=source)
+        except NeedsStage as exc:
+            return self.result(
+                "ask", f"A trusted answer came from GitHub, but it needs a stage: {exc} Apply it with answer --to "
+                f"<stage> --from '{source}'.", kind=checkpoint_kind(s), github_answer=latest)
+        except Refused as exc:
+            self.tell.append(f"Didn't apply the GitHub answer from {source}: {exc}")
+        s["inbox_seen"] = now()
+        self.save()
+        if outcome == "paused":
+            return self.result("paused", f"{source} paused the run. It stays where it is; `<factory> <run-id>` "
+                               "picks it up again.")
+        return None if len(s["history"]) > moves else False
+
+    # -- answers -------------------------------------------------------------------------------------------
+
+    def answer(self, text, to=None, source=None):
+        """Apply a human's answer to the stop the run is at. Returns 'paused', or None once the run moved."""
+        s, st = self.s, self.s["stage"]
+        text = text.strip()
+        if not text:
+            raise Refused("the answer is empty")
+        if st in TERMINAL:
+            raise Refused(f"run is {st}; it takes no answers")
+        kw = command_answer(text)
+        src = f" (from {source})" if source else ""
+        if kw == "pause":
+            return "paused"
+        if kw == "abort":
+            self.advance("aborted", "aborted by a human" + src)
+            return None
+        if kw == "steer" and st != "blocked":
+            self.advance("blocked", f"steer requested at {st}")
+            return None
+        if st == "checkpoint-1" and checkpoint_kind(s).startswith("triage"):
+            if kw == "ship":
+                raise Refused("the run is waiting on triage's questions: answer approve (use the defaults), your "
+                              "answers, steer, pause or abort")
+            self.feedback(f"Checkpoint 1: triage{src}", "Use triage's suggested defaults." if kw == "approve" else text)
+            self.advance("implement" if "spec" in skip_setting(s) else "spec", "triage answered", human=True)
+        elif st == "checkpoint-1":
+            if kw == "ship":
+                raise Refused("the run is waiting on spec approval (checkpoint 1), not ship approval: answer "
+                              "approve, feedback, steer, pause or abort")
+            heading = f"Checkpoint 1: round {s['rounds']['spec']}{src}"
+            if kw == "approve":
+                open_qs = section(read(self.folder, "spec.md"), "Open questions").rstrip(".").lower() not in ("", "none")
+                self.feedback(heading, "Approved." + (" Accepts the defaults for the spec's open questions."
+                                                      if open_qs else ""))
+                self.advance("implement", "spec approved")
+            else:
+                self.feedback(heading, text)
+                self.advance("spec", "revise")
+        elif st == "checkpoint-2":
+            heading = f"Checkpoint 2: round {s['rounds']['implement']}{src}"
+            if kw == "approve":
+                raise Refused("the run is waiting on ship approval (checkpoint 2), not spec approval: answer ship, "
+                              "feedback, steer, pause or abort")
+            if kw == "ship":
+                self.feedback(heading, "Ship.")
+                self.advance("ship", "ship approved")
+            elif to not in ("spec", "implement", "verify"):
+                raise NeedsStage("ship-approval feedback goes back to spec (the requirements were wrong), implement "
+                                 "(the code is wrong or missing something), or verify (the evidence is insufficient): "
+                                 "pass --to with one of them.")
+            else:
+                self.feedback(heading, text)
+                self.advance(to, "sent back")
+        elif st == "blocked":
+            entry = s["history"][-1]
+            steer = re.match(r"steer requested at (\S+)", entry["note"] or "")
+            if steer:
+                origin, target = steer.group(1), to or steer.group(1)
+            elif entry["from"] == "land":
+                if to not in ("implement", "spec", "land"):
+                    raise NeedsStage("land asked a question: pass --to implement (make a change), spec (the "
+                                     "requirements change), or land (keep waiting on the PR).")
+                origin, target = "land", to
+            else:
+                origin, target = entry["from"], to or entry["from"]
+            self.feedback(f"Steer: {origin}{src}", text)
+            self.advance(target, "unblocked" if target == origin and not steer else "steered", human=True)
+        elif st == "land":
+            if kw in ("approve", "ship"):
+                raise Refused("the PR is already open, and only a human merges it: give feedback for a fix round, "
+                              "or pause, steer or abort")
+            self.advance("implement", "PR feedback", human=True)
+            self.feedback(f"Land: round {s['rounds']['land']}{src}", text)
+        else:
+            raise Refused(f"the run is at {st}; nothing is waiting on an answer. You can pause, steer or abort.")
+        return None
+
+    # -- the end -------------------------------------------------------------------------------------------
+
+    def finish(self):
+        s, st = self.s, self.s["stage"]
+        if s.get("finished_at"):
+            return self.result("ended", "This run has ended; there is nothing left to do.", outcome=st,
+                               pr_url=s.get("pr_url"))
+        before_work = st == "aborted" and not s["rounds"].get("implement") and not read(self.folder, "feedback.md")
+        if not (s.get("learned_at") or s.get("retro_skipped") or before_work):
+            d = s.get("dispatched")
+            if not d or d["stage"] != "retro":
+                return self.dispatch("retro")
+            if not self.fresh(d):
+                return self.dispatch("retro", again=True)
+            try:
+                message, warning = learn_run(self.path, s)
+                self.did.append(f"learned: {message}")
+                if warning:
+                    self.warnings.append(warning)
+            except Refused as exc:
+                self.warnings.append(f"learn failed: {exc}")
+        proposals = [line[2:].strip() for line in section(read(self.folder, "retro.md"), "Proposed repo changes").splitlines()
+                     if line.startswith("- ") and line[2:].strip().rstrip(".").lower() != "none"]
+        if s.get("worktree"):
+            try:
+                released = release_run(s)
+            except Refused as exc:
+                released = None
+                self.warnings.append(f"{exc}. The worktree is left at {s['worktree']}")
+        else:
+            current = self.git("branch", "--show-current").stdout.strip()
+            released = None
+            if current == s["branch"]:
+                r = self.git("switch", s["base_branch"])
+                released = f"switched back to {s['base_branch']}" if r.returncode == 0 else None
+                if r.returncode != 0:
+                    self.warnings.append(f"couldn't switch back to {s['base_branch']}: {r.stderr.strip()[:200]}")
+        s.pop("dispatched", None)
+        s["finished_at"] = now()
+        self.save()
+        return self.result(
+            "finish", "Tell the human the outcome and the PR link. List each proposed repo change in one line with "
+            "the command that would start it as a run (`<factory> <proposal>`); never start them yourself. Then print "
+            f"`{self.state_cmd} stats {s['id']}`. If you subscribed to PR events, unsubscribe.",
+            outcome=st, pr_url=s.get("pr_url"), proposals=proposals, released=released)
+
+
+def cmd_next(run_id, tokens=None, usd=None):
+    path, s = load(run_id)
+    driver = Driver(path, s)
+    try:
+        if tokens is not None:
+            driver.record_usage(tokens, usd)
+        print(json.dumps(driver.run(), indent=2))
+    except Refused as exc:
+        die(str(exc))
+
+
+def cmd_answer(run_id, text, to=None, source=None):
+    path, s = load(run_id)
+    driver = Driver(path, s)
+    try:
+        if driver.answer(text, to=to, source=source) == "paused":
+            print(json.dumps(driver.result("paused", "The run is paused where it is. `<factory> <run-id>` picks it "
+                                           "up again."), indent=2))
+            return
+        print(json.dumps(driver.run(), indent=2))
+    except Refused as exc:
+        die(str(exc))
 
 
 COMMANDS = {
@@ -1483,7 +2184,7 @@ COMMANDS = {
     "release": (cmd_release, 1), "pr-status": (cmd_pr_status, 1), "inbox": (cmd_inbox, 1),
     "checkpoint-post": (cmd_checkpoint_post, 1), "pr-update": (cmd_pr_update, 1), "usage": (cmd_usage, 3), "stats": (cmd_stats, 0),
     "policy": (cmd_policy, 1), "learn": (cmd_learn, 1), "signals": (cmd_signals, 0), "seen": (cmd_seen, 1), "approval": (cmd_approval, 1),
-    "skips": (cmd_skips, 0),
+    "skips": (cmd_skips, 0), "next": (cmd_next, 1), "answer": (cmd_answer, 2),
 }
 
 
@@ -1498,9 +2199,9 @@ def main(argv):
         path, s = load(args[0])
         print(path.read_text(), end="")
         if s["stage"] in HUMAN_STAGES and (s.get("thread_url") or s.get("pr_url")):
-            # Resuming without an answer must look on GitHub first; say so where the orchestrator looks.
+            # Resuming without an answer must look on GitHub first; `next` does, so say to use it.
             print(f"note: {s['id']} is waiting on a human and has a GitHub thread. Without an answer in the "
-                  f"arguments, run `inbox {s['id']}` and apply the latest /factory answer before asking.",
+                  f"arguments, run `next {s['id']}`: it applies the latest trusted /factory answer before asking.",
                   file=sys.stderr)
         return
     fn, nargs = COMMANDS[name]
@@ -1511,7 +2212,7 @@ def main(argv):
 
 
 # Commands that change a run's state.json or feedback.md; each holds the run's lock while it runs.
-WRITERS = {"advance", "set", "feedback", "seen", "usage", "learn"}
+WRITERS = {"advance", "set", "feedback", "seen", "usage", "learn", "next", "answer"}
 
 
 def dispatch(name, fn, nargs, args):
@@ -1539,6 +2240,32 @@ def dispatch(name, fn, nargs, args):
         if len(args) > 1:
             die("usage: signals [<run-id>] [--days N]")
         return fn(*args, days=days)
+    if name == "next":
+        opts, rest = {}, list(args[1:])
+        while rest:
+            flag = rest.pop(0)
+            if flag in ("--tokens", "--usd") and rest:
+                try:
+                    opts[flag[2:]] = int(rest[0]) if flag == "--tokens" else float(rest[0])
+                except ValueError:
+                    die(f"{flag} takes a number")
+                if opts[flag[2:]] < 0:
+                    die("usage cannot be negative")
+                rest.pop(0)
+            else:
+                die("usage: next <run-id> [--tokens N [--usd X]]")
+        if not args or ("usd" in opts and "tokens" not in opts):
+            die("usage: next <run-id> [--tokens N [--usd X]]")
+        return fn(args[0], **opts)
+    if name == "answer":
+        opts, rest = {}, list(args[1:])
+        while rest and rest[0] in ("--to", "--from") and len(rest) > 1:
+            opts["to" if rest[0] == "--to" else "source"] = rest[1]
+            rest = rest[2:]
+        if not args or not rest:
+            die("usage: answer <run-id> [--to <stage>] [--from <source>] <answer | ->")
+        text = sys.stdin.read() if rest == ["-"] else " ".join(rest)
+        return fn(args[0], text, **opts)
     if name == "skips" and len(args) <= 1:
         return fn(*args)
     if name == "pr-report" and args[1:] == ["--no-media"]:

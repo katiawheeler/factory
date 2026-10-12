@@ -12,7 +12,7 @@ How the factory reports on itself, learns from each run, and checks merged work 
 - PR fix rounds per PR
 - median time to PR and to merge, and how long runs wait on humans
 
-`state.py stats <run-id>` breaks one run down by stage. When the host reports a subagent's token usage, the orchestrator records it with `state.py usage`, and `stats` adds tokens and cost. `--json` gives machine-readable output.
+`state.py stats <run-id>` breaks one run down by stage. When the host reports a subagent's token usage, the orchestrator records it with `state.py next <run-id> --tokens <n>`, and `stats` adds tokens and cost. `--json` gives machine-readable output.
 
 ## Learning from each run
 

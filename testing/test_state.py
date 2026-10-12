@@ -446,7 +446,7 @@ else:
         self.assertNotIn("inbox", self.run_state("show", self.id).stderr)
         self.advance("blocked")
         r = self.run_state("show", self.id)
-        self.assertIn(f"run `inbox {self.id}`", r.stderr)
+        self.assertIn(f"run `next {self.id}`", r.stderr)
         json.loads(r.stdout)
 
     def test_checkpoint_post_puts_the_spec_on_the_issue_when_enabled(self):
@@ -861,6 +861,331 @@ else:
         result = json.loads(self.run_state("check-verification", self.id).stdout)
         self.assertEqual(result["results"], {"AC1": "verified", "AC2": "verified"})
 
+
+    # -- next and answer: the loop in state.py ---------------------------------------------------------------
+
+    TRIAGE = ("# Triage\n\nVerdict: proceed\nSource: none\n\n## Resolved input\nFix the word count.\n\n"
+              "## Classification\nType: bug\nSize: S\n")
+
+    @staticmethod
+    def spec(n):
+        return (f"# Spec: fix\n\nRound: {n}\n\n## Acceptance criteria\n- [ ] AC1: counts words. **Verify by:** run it\n"
+                f"- [ ] AC2: empty is 0. **Verify by:** run it\n\n## Open questions\nNone.\n")
+
+    @staticmethod
+    def verification(n, verdict="pass", suite="pass", ac2="verified"):
+        return (f"# Verification\n\nRound: {n}\nVerdict: {verdict}\nSuite: {suite}\n\n### AC1: counts words\n"
+                f"Result: verified\nReplay: npx playwright test AC1\n\n### AC2: empty is 0\nResult: {ac2}\n")
+
+    def step(self, *extra, env=None):
+        return json.loads(self.run_state("next", self.id, *extra, env=env).stdout)
+
+    def answer(self, *args, input="", ok=True, env=None):
+        r = self.run_state("answer", self.id, *args, input=input, ok=ok, env=env)
+        return json.loads(r.stdout) if ok else r.stderr
+
+    def write(self, name, text):
+        (self.repo / ".factory/runs" / self.id / name).write_text(text)
+
+    def to_spec_approval(self):
+        self.step()
+        self.write("triage.md", self.TRIAGE)
+        self.step()
+        self.write("spec.md", self.spec(1))
+        return self.step()
+
+    def to_verify(self):
+        self.to_spec_approval()
+        self.answer("approve")
+        self.write("implementation.md", "Round: 1\nStatus: done\n")
+        self.step()
+        self.write("review.md", "Round: 1\nVerdict: approve\n")
+        return self.step()
+
+    def test_next_dispatches_each_stage_and_redispatches_one_that_wrote_nothing(self):
+        folder = self.repo / ".factory/runs" / self.id
+        out = self.step()
+        self.assertEqual((out["action"], out["stage"], out["round"], out["agent"]),
+                         ("dispatch", "triage", 1, "factory-triage"))
+        self.assertTrue(out["prompt"].splitlines()[0].endswith("stages/triage.md and follow it."))
+        self.assertIn(f"Run folder: {folder}\n", out["prompt"])
+        self.assertIn(f"Repository: {self.repo / '.factory/worktrees' / self.id}.", out["prompt"])
+        again = self.step("--tokens", "1200", "--usd", "0.5")
+        self.assertEqual(again["round"], 1)
+        self.assertIn("didn't finish", again["tell"][0])
+        self.assertEqual([(u["stage"], u["round"], u["tokens"]) for u in self.state()["usage"]], [("triage", 1, 1200)])
+        self.write("triage.md", self.TRIAGE)
+        out = self.step()
+        self.assertEqual((out["stage"], out["round"], out["did"]), ("spec", 1, ["triage → spec"]))
+        self.assertEqual(self.state()["input_summary"], "Fix the word count.")
+        self.write("spec.md", self.spec(1))
+        out = self.step()
+        self.assertEqual((out["action"], out["kind"], out["choices"][0]), ("ask", "spec-approval", "approve"))
+        self.assertEqual(out["spec"], str(folder / "spec.md"))
+        self.assertEqual(self.step()["kind"], "spec-approval")  # asking again moves nothing
+        self.assertEqual([e["to"] for e in self.state()["history"]], ["triage", "spec", "checkpoint-1"])
+
+    def test_a_stage_that_never_writes_its_output_goes_to_a_human(self):
+        for _ in range(3):
+            self.assertEqual(self.step()["action"], "dispatch")
+        out = self.step()
+        self.assertEqual((out["action"], out["kind"], out["raised_by"]), ("ask", "blocked", "triage"))
+        self.assertEqual(out["question"], "triage wrote no usable triage.md in 3 dispatches")
+        self.assertEqual(self.answer("try again")["stage"], "triage")
+        self.write("triage.md", "Verdict: maybe\n")
+        out = self.step()
+        self.assertIn("Fix from the orchestrator: your last triage.md can't be used: it needs exactly one "
+                      "`Verdict: proceed | needs-human | reject` line", out["prompt"])
+
+    def test_answer_applies_spec_approval_revisions_and_pause(self):
+        self.to_spec_approval()
+        self.assertIn("waiting on spec approval", self.answer("ship", ok=False))
+        self.assertEqual(self.answer("pause")["action"], "paused")
+        out = self.answer("-", input="make it blue\n")
+        self.assertEqual((out["stage"], out["round"], out["did"]), ("spec", 2, ["checkpoint-1 → spec: revise"]))
+        self.write("spec.md", self.spec(1))
+        self.assertEqual(self.step()["action"], "dispatch")  # a round 1 spec isn't round 2's output
+        self.write("spec.md", self.spec(2))
+        self.assertEqual(self.step()["kind"], "spec-approval")
+        out = self.answer("approve")
+        self.assertEqual((out["stage"], out["round"]), ("implement", 1))
+        self.assertEqual((self.repo / ".factory/runs" / self.id / "feedback.md").read_text(),
+                         "## Checkpoint 1: round 1\nmake it blue\n\n## Checkpoint 1: round 2\nApproved.\n\n")
+        self.assertEqual(json.loads(self.run_state("stats", self.id, "--json").stdout)["spec_revisions"], 1)
+
+    def test_triage_questions_go_to_spec_with_the_answers(self):
+        self.step()
+        self.write("triage.md", "Verdict: needs-human\n\n## Open questions\n- Tabs or spaces? Default: both\n")
+        out = self.step()
+        self.assertEqual((out["kind"], out["open_questions"]), ("triage-questions", "- Tabs or spaces? Default: both"))
+        out = self.answer("approve")
+        self.assertEqual((out["stage"], out["did"]), ("spec", ["checkpoint-1 → spec: triage answered"]))
+        self.assertIn("## Checkpoint 1: triage\nUse triage's suggested defaults.",
+                      (self.repo / ".factory/runs" / self.id / "feedback.md").read_text())
+
+    def test_next_caps_review_rounds_and_advance_enforces_the_cap(self):
+        self.to_spec_approval()
+        self.answer("approve")
+        for n in (1, 2, 3):
+            self.write("implementation.md", f"Round: {n}\nStatus: done\n")
+            self.assertEqual(self.step()["stage"], "review")
+            self.write("review.md", f"Round: {n}\nVerdict: changes-requested\n")
+            out = self.step()
+        self.assertEqual((out["action"], out["kind"], out["note"]), ("ask", "ship-approval", "review did not converge"))
+        self.id = self.run_state("new", "b", "-", input="x").stdout.split()[0]
+        self.advance("spec", "checkpoint-1", "implement", "review", "implement", "review", "implement", "review")
+        err = self.run_state("advance", self.id, "implement", ok=False).stderr
+        self.assertIn("review has used all 3 attempts; go to checkpoint-2 with the note 'review did not converge'", err)
+        self.advance("checkpoint-2")
+
+    def test_next_caps_verify_rounds(self):
+        self.to_verify()
+        for n in (1, 2, 3):
+            self.write("verification.md", self.verification(n, "fail", ac2="failed"))
+            out = self.step()
+            if n < 3:
+                self.assertEqual((out["stage"], out["did"][0]), ("implement", "verify → implement: verify failed"))
+                self.write("implementation.md", f"Round: {n + 1}\nStatus: done\n")
+                self.step()
+                self.write("review.md", f"Round: {n + 1}\nVerdict: approve\n")
+                self.step()
+        self.assertEqual((out["kind"], out["note"]), ("ship-approval", "verify did not pass"))
+
+    def test_invalid_verification_is_sent_back_once_then_blocks(self):
+        out = self.to_verify()
+        self.assertEqual((out["stage"], out["round"]), ("verify", 1))
+        self.write("verification.md", "Round: 1\nVerdict: pass\nSuite: pass\n")
+        out = self.step()
+        self.assertEqual((out["stage"], out["round"]), ("verify", 1))
+        self.assertIn("Fix from the orchestrator: your last verification.md can't be used: correct verification.md: "
+                      "criterion mismatch", out["prompt"])
+        self.write("verification.md", "Round: 1\nVerdict: pass\nSuite: pass\n\n")
+        out = self.step()
+        self.assertEqual((out["kind"], out["raised_by"]), ("blocked", "verify"))
+        self.assertTrue(out["question"].startswith("verification report invalid: correct verification.md"))
+        out = self.answer("no display here; AC2 can't be checked")
+        self.assertEqual((out["stage"], out["round"], out["did"]), ("verify", 2, ["blocked → verify: unblocked"]))
+        self.write("verification.md", self.verification(2, "fail", ac2="unverifiable"))
+        out = self.step()
+        self.assertEqual((out["kind"], out["note"]), ("ship-approval", "unverifiable: AC2"))
+        self.assertEqual(out["verification"]["results"], {"AC1": "verified", "AC2": "unverifiable"})
+        self.assertEqual((out["review"], out["replay"]), ("approve", ["Replay: npx playwright test AC1"]))
+        self.assertIn("pass --to with one of them", self.answer("-", input="add a test", ok=False))
+        out = self.answer("--to", "implement", "-", input="add a test")
+        self.assertEqual((out["stage"], out["did"]), ("implement", ["checkpoint-2 → implement: sent back"]))
+
+    def test_blocked_implement_and_leaked_run_files(self):
+        self.to_spec_approval()
+        self.answer("approve")
+        self.write("implementation.md", "Round: 1\nStatus: blocked\n\n## Blocked on\nWhich database?\n")
+        out = self.step()
+        self.assertEqual((out["kind"], out["question"], out["raised_by"]), ("blocked", "Which database?", "implement"))
+        out = self.answer("Postgres")
+        self.assertEqual((out["stage"], out["round"]), ("implement", 2))
+        self.assertIn("## Steer: implement\nPostgres", (self.repo / ".factory/runs" / self.id / "feedback.md").read_text())
+        wt = self.repo / ".factory/worktrees" / self.id
+        (wt / ".factory").mkdir()
+        (wt / ".factory/leak.md").write_text("x")
+        self.git("add", "-f", ".factory/leak.md", cwd=wt)
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "leak", cwd=wt)
+        self.write("implementation.md", "Round: 2\nStatus: done\n")
+        out = self.step()
+        self.assertEqual((out["stage"], out["round"]), ("implement", 2))
+        self.assertIn("run files leaked into the branch (.factory/leak.md)", out["prompt"])
+
+    def test_ship_waits_for_the_push_and_land_follows_the_pr_to_a_retro(self):
+        remote = self.repo.parent / f"{self.repo.name}-up.git"
+        self.addCleanup(shutil.rmtree, remote, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        self.git("remote", "add", "origin", str(remote))
+        self.git("push", "-q", "-u", "origin", "main")
+        wt = self.repo / ".factory/worktrees" / self.id
+        commit = lambda msg: self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                                      "-m", msg, cwd=wt)
+        self.advance("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2")
+        out = self.answer("ship")
+        self.assertEqual((out["action"], out["kind"], out["did"]), ("ship", "first", ["checkpoint-2 → ship: ship approved"]))
+        self.assertIn("guides/ship.md", out["instruction"])
+        self.assertEqual(self.step()["unfinished"], "no pr_url is recorded yet")
+        commit("work")
+        self.git("push", "-q", "-u", "origin", f"factory/{self.id}", cwd=wt)
+        commit("more work")
+        self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
+        self.assertEqual(self.step()["unfinished"], "the run branch has commits that aren't on the remote yet")
+        self.git("push", "-q", cwd=wt)
+        out = self.step()
+        self.assertEqual((out["stage"], out["round"], out["did"]), ("land", 1, ["ship → land: PR opened"]))
+        self.write("land.md", "Round: 1\nVerdict: wait\n\n## Waiting on\nCI: test\n")
+        out = self.step()
+        self.assertEqual((out["action"], out["waiting_on"]), ("wait", "CI: test"))
+        self.assertIn("inbox_seen", self.state())
+        self.assertNotIn("tell", self.step())  # checking the PR again is a fresh dispatch
+        self.write("land.md", "Round: 1\nVerdict: fix\n\n## Fix\n- [ ] CI test: fix it\n")
+        out = self.step()
+        self.assertEqual((out["stage"], out["round"], out["did"]), ("implement", 2, ["land → implement: PR feedback"]))
+        self.run_state("set", self.id, "report_url", "https://github.com/o/r/pull/7#c1")
+        self.write("implementation.md", "Round: 2\nStatus: done\n")
+        self.step()
+        self.write("review.md", "Round: 2\nVerdict: approve\n")
+        self.step()
+        (self.repo / ".factory/runs" / self.id / "spec.md").write_text(self.spec(1))
+        self.write("verification.md", self.verification(2))
+        out = self.step()
+        self.assertEqual((out["action"], out["kind"], out["did"]), ("ship", "fix-round", ["verify → ship: PR fixes"]))
+        self.assertEqual(self.step()["did"], ["ship → land: pushed PR fixes"])
+        self.write("land.md", "Round: 2\nVerdict: merged\n")
+        out = self.step()
+        self.assertEqual((out["action"], out["agent"], out["did"]), ("dispatch", "factory-retro", ["land → merged"]))
+        self.write("retro.md", "# Retro\n\n## Learnings\n- [Commands] Run `make test`.\n\n"
+                               "## Proposed repo changes\n- Document `make test` in CONTRIBUTING.md\n")
+        out = self.step()
+        self.assertEqual((out["action"], out["outcome"]), ("finish", "merged"))
+        self.assertEqual(out["proposals"], ["Document `make test` in CONTRIBUTING.md"])
+        self.assertTrue(out["released"].startswith("removed worktree"))
+        self.assertTrue(out["did"][0].startswith("learned: added 1"))
+        self.assertFalse(wt.exists())
+        self.assertIn(f"Run `make test`. _({self.id})_", (self.repo / ".factory/learnings.md").read_text())
+        self.assertEqual(self.step()["action"], "ended")
+
+    def test_land_caps_fix_rounds_and_its_questions_need_a_stage(self):
+        env = self.github({})
+        self.ship()
+        for n in (1, 2, 3, 4):
+            self.step(env=env)
+            self.write("land.md", f"Round: {n}\nVerdict: fix\n")
+            out = self.step(env=env)
+            if n < 4:
+                self.assertEqual(out["stage"], "implement")
+                self.advance("review", "verify", "ship", "land")
+        self.assertEqual((out["kind"], out["note"]), ("ship-approval", "PR feedback did not converge"))
+        self.assertIn("post_on_github", out)
+        self.id = self.run_state("new", "b", "-", input="x").stdout.split()[0]
+        self.ship()
+        self.step(env=env)
+        self.write("land.md", "Round: 1\nVerdict: needs-human\n\n## Needs a human\nRename it or keep it?\n")
+        out = self.step(env=env)
+        self.assertEqual((out["kind"], out["question"], out["raised_by"]), ("blocked", "Rename it or keep it?", "land"))
+        self.assertIn("pass --to implement", self.answer("keep it", ok=False, env=env))
+        out = self.answer("--to", "land", "keep it", env=env)
+        self.assertEqual((out["stage"], out["action"], out["did"]), ("land", "dispatch", ["blocked → land: unblocked"]))
+
+    def test_advance_refuses_a_pr_fix_round_past_the_cap(self):
+        self.ship()
+        for _ in range(3):
+            self.advance("implement", "review", "verify", "ship", "land")
+        self.assertIn("all 3 fix rounds", self.run_state("advance", self.id, "implement", ok=False).stderr)
+        out = self.answer("-", input="one more thing")  # a human asking for it directly isn't capped
+        self.assertEqual((out["stage"], out["did"]), ("implement", ["land → implement: PR feedback"]))
+        self.assertIn("## Land: round 4\none more thing", (self.repo / ".factory/runs" / self.id / "feedback.md").read_text())
+
+    def test_next_skips_what_the_repo_skips(self):
+        self.git("config", "factory.skip", "all")
+        out = self.step()
+        self.assertEqual((out["stage"], out["did"]),
+                         ("implement", ["triage → implement: skipped triage, spec, checkpoint-1 (factory.skip)"]))
+        self.assertEqual(self.state()["input_summary"], "do it")
+        self.write("implementation.md", "Round: 1\nStatus: done\n")
+        out = self.step()
+        self.assertEqual((out["action"], out["did"]),
+                         ("ship", ["implement → ship: skipped review, verify, checkpoint-2 (factory.skip)"]))
+
+    def test_next_tells_the_human_a_spec_was_auto_approved(self):
+        self.git("config", "factory.autoApproveSpec", "S")
+        self.step()
+        self.write("triage.md", self.TRIAGE)
+        self.step()
+        self.write("spec.md", self.spec(1))
+        out = self.step()
+        self.assertEqual(out["stage"], "implement")
+        self.assertIn("auto-approved by the repo's policy (size S, type bug)", out["tell"][0])
+
+    def test_next_applies_a_trusted_answer_from_github(self):
+        self.to_spec_approval()
+        self.run_state("set", self.id, "thread_url", "https://github.com/o/r/issues/3")
+        comments = [self.comment("owner", "/factory approve", "2999-01-01T00:00:00Z"),
+                    self.comment("stranger", "/factory abort", "2999-01-01T00:00:01Z")]
+        data = {"perms": {"owner": "admin"}, "repos/o/r/issues/3/comments": comments}
+        out = self.step(env=self.github(data))
+        self.assertEqual((out["stage"], out["did"]), ("implement", ["checkpoint-1 → implement: spec approved"]))
+        self.assertIn("Ignored `/factory` comment from @stranger (no write access)", out["tell"][0])
+        self.assertIn("## Checkpoint 1: round 1 (from @owner on GitHub: https://github.com/o/r/c/owner-2999-01-01T00:00:00Z)",
+                      (self.repo / ".factory/runs" / self.id / "feedback.md").read_text())
+        self.advance("review", "verify", "checkpoint-2")
+        comments.append(self.comment("owner", "/factory make the button red", "2999-01-02T00:00:00Z"))
+        out = self.step(env=self.github(data))
+        self.assertEqual((out["action"], out["github_answer"]["answer"]), ("ask", "make the button red"))
+        self.assertIn("answer --to", out["instruction"])
+        self.assertEqual(self.state()["stage"], "checkpoint-2")
+
+    def test_steer_at_ship_approval_goes_where_the_human_says(self):
+        self.advance("spec", "checkpoint-1", "implement", "review", "verify", "checkpoint-2")
+        out = self.answer("steer")
+        self.assertEqual((out["kind"], out["note"]), ("steer", "steer requested at checkpoint-2"))
+        out = self.answer("--to", "review", "I fixed the typo myself")
+        self.assertEqual((out["stage"], out["did"]), ("review", ["blocked → review: steered"]))
+        self.assertIn("## Steer: checkpoint-2\nI fixed the typo myself",
+                      (self.repo / ".factory/runs" / self.id / "feedback.md").read_text())
+
+    def test_an_in_place_run_switches_to_its_branch_for_implement_and_back_at_the_end(self):
+        self.id = self.run_state("new", "a", "-", "--in-place", input="x").stdout.split()[0]
+        self.to_spec_approval()
+        out = self.answer("approve")
+        self.assertIn(f"switched the checkout to factory/{self.id}", out["did"])
+        self.assertEqual(self.git("branch", "--show-current"), f"factory/{self.id}")
+        out = self.answer("abort")
+        self.assertEqual((out["action"], out["agent"]), ("dispatch", "factory-retro"))  # work began, so a retro
+        self.write("retro.md", "# Retro\n\n## Learnings\n\n## Proposed repo changes\nNone.\n")
+        out = self.step()
+        self.assertEqual((out["released"], out.get("proposals")), ("switched back to main", None))
+        self.assertEqual(self.git("branch", "--show-current"), "main")
+
+    def test_abort_before_any_work_finishes_without_a_retro(self):
+        self.step()
+        out = self.answer("abort")
+        self.assertEqual((out["action"], out["outcome"], out["did"]),
+                         ("finish", "aborted", ["triage → aborted: aborted by a human"]))
+        self.assertFalse((self.repo / ".factory/worktrees" / self.id).exists())
+        self.assertIn("no answers", self.answer("approve", ok=False))
 
 if __name__ == "__main__":
     unittest.main()

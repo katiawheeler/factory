@@ -6,7 +6,7 @@
 python3 testing/test_state.py
 ```
 
-These cover concurrent writes to one run, the stage transitions `advance` allows and skipping stages with `factory.skip` and a run's own `--skip` (what can't be skipped, ship only after passing checks, spec-less verification, the report and stats lines), spec auto-approval policy and its guard, `learn` (adding, de-duplicating, retiring, categories), `signals` (reverts, checks on the merge commit, the custom command, the time window), follow-up runs with `--parent`, the land stage (shipping only after checkpoint 2 or for a PR fix round, PR fix rounds and their cap, merged and closed, land notifications), `pr-status` check summaries, `inbox` trust rules (write access, `factory.approvers`, bots, the factory's own posts, comments from before the cursor), `checkpoint-post` on an issue (opt-in) and on a PR, `pr-update`, the `usage` and `stats` ledger, run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report (one screenshot and one recording per criterion, media attached with a gh that supports `--attach`, listed by name without one, oversized files skipped) and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
+These cover `next` and `answer` (each stage's routing, re-dispatching a stage that wrote nothing and sending it to a human after three tries, sending back an unreadable output once, the review, verify and PR fix caps, unverifiable criteria, blocked stages and steering, `.factory/` leaking into the branch, skipped stages and auto-approved specs, trusted and untrusted answers on GitHub, ship waiting for the push, land's wait, fix, question and merge, the retro, learnings and cleanup, in-place runs, and aborting before work), concurrent writes to one run, the stage transitions `advance` allows and the caps it enforces and skipping stages with `factory.skip` and a run's own `--skip` (what can't be skipped, ship only after passing checks, spec-less verification, the report and stats lines), spec auto-approval policy and its guard, `learn` (adding, de-duplicating, retiring, categories), `signals` (reverts, checks on the merge commit, the custom command, the time window), follow-up runs with `--parent`, the land stage (shipping only after checkpoint 2 or for a PR fix round, PR fix rounds and their cap, merged and closed, land notifications), `pr-status` check summaries, `inbox` trust rules (write access, `factory.approvers`, bots, the factory's own posts, comments from before the cursor), `checkpoint-post` on an issue (opt-in) and on a PR, `pr-update`, the `usage` and `stats` ledger, run creation in a per-run worktree and in place, sharing runs across worktrees, releasing a worktree, notifications, the PR report (one screenshot and one recording per criterion, media attached with a gh that supports `--attach`, listed by name without one, oversized files skipped) and its size limit, dirty-tree and detached-HEAD guards, advance and set guards, loop-cap attempt counting and resets, feedback headings, `list`, and verification report validation.
 
 ## Eval runner tests
 
@@ -14,7 +14,7 @@ These cover concurrent writes to one run, the stage transitions `advance` allows
 python3 testing/test_evals.py
 ```
 
-These drive [`evals/run.py`](evals/README.md) with a fake agent: a passing case after a session that dies mid-stage and is resumed, stray files and a wrong triage verdict failing their checks, and the baseline comparison flagging a regression. To run the evals with real agents, see [`evals/README.md`](evals/README.md).
+These drive [`evals/run.py`](evals/README.md) with a fake agent that orchestrates the way `SKILL.md` says, by following `state.py next`: a passing case after a session that dies mid-stage and is resumed, stray files and a wrong triage verdict failing their checks, and the baseline comparison flagging a regression. To run the evals with real agents, see [`evals/README.md`](evals/README.md).
 
 ## Forcing loop caps and blocked stages with Claude Code stub agents
 
@@ -190,6 +190,8 @@ Use a sample repo with CI on pull requests, and a second GitHub account (or a te
 | Stale base: `new` refused to start the follow-up while local `main` was 3 commits behind, and said to pull | real agents, `katiawheeler/vibe` | ✅ |
 | Auto-approval: specs with open questions stop at ① (2 runs); an unambiguous chore is auto-approved, then ships and merges (vibe#24) | real agents, `katiawheeler/vibe` | ✅ |
 
+The orchestrator was rewritten around `state.py next` and `answer` after the runs above. Those commands are covered by the unit tests and the fake-agent eval runs, and the end-to-end paths above should be rerun with real agents to confirm the shorter `SKILL.md` holds up; until then, treat the rows above as evidence for the earlier orchestrator. Re-record the eval baseline at the same time.
+
 Codex GUI question routing and selection of a dedicated PR creation skill are documented behavior; they have not yet been exercised in an end-to-end factory run.
 
 ## Findings from the first real runs
@@ -199,7 +201,7 @@ Running the land, GitHub-answer, retro, signals and auto-approval flows on `kati
 1. A headless orchestrator skipped posting a checkpoint on the issue. `advance` now prints the `checkpoint-post` command whenever a stop should be posted.
 2. `/factory approve` with a signature under it read as feedback. A keyword alone on the first line is now the whole answer.
 3. `gh pr create` and `gh pr comment` need GraphQL, which some hosts block. The comment commands now print a REST `fallback:` line.
-4. A resume without arguments didn't check GitHub for an answer. `show` now prints a note saying to run `inbox`.
+4. A resume without arguments didn't check GitHub for an answer. `show` printed a note saying to run `inbox`; now `next` reads GitHub answers itself.
 5. Retro token usage was rejected by `usage`.
 6. A blocked run with an open PR had to fake a `ship` to get back to `land`.
 7. A retro that copied the `_(run-id)_` suffix got it twice.
