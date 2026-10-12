@@ -3,35 +3,35 @@
   <desc id="description">A ticket, URL, or prompt enters a loop that runs Triage, Spec, Implement, Review, Verify, Ship, and Land. Ship opens a PR and Land follows it until it merges or closes. A human approves the spec before implementation and decides to ship after verification. Failed review or verification, and CI failures or review comments on the PR, send work back to Implement.</desc>
   <defs>
     <marker id="arrow" markerWidth="14" markerHeight="14" refX="9" refY="7" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1 L10 7 L2 13" fill="none" stroke="#463a14" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M2 1 L10 7 L2 13" fill="none" stroke="#1a1d22" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
     <marker id="arrow-muted" markerWidth="12" markerHeight="12" refX="8" refY="6" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1 L8 6 L2 11" fill="none" stroke="#9a8f6c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M2 1 L8 6 L2 11" fill="none" stroke="#8a8e94" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
-    <g id="person" fill="none" stroke="#1b1bff" stroke-width="2.4" stroke-linecap="round">
+    <g id="person" fill="none" stroke="#1a1d22" stroke-width="2.4" stroke-linecap="round">
       <circle cx="0" cy="-6" r="7"/>
       <path d="M-12 13 C-12 4 -6 1 0 1 C6 1 12 4 12 13"/>
     </g>
     <style>
       text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-      .stage { font-size: 32px; fill: #463a14; }
-      .human { font-size: 32px; fill: #1b1bff; }
-      .title { font-size: 50px; fill: #463a14; font-weight: 500; text-anchor: middle; }
-      .muted { font-size: 22px; fill: #9a8f6c; }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; fill: #9a8f6c; text-anchor: middle; }
-      .box { fill: none; stroke: #1b1bff; stroke-width: 3; stroke-dasharray: 7 7; }
-      .link { stroke: #1b1bff; stroke-width: 3; stroke-dasharray: 7 7; }
-      .dot { fill: #1b1bff; }
+      .stage { font-size: 32px; fill: #1a1d22; }
+      .human { font-size: 32px; fill: #1a1d22; font-weight: 600; }
+      .title { font-size: 50px; fill: #1a1d22; font-weight: 500; text-anchor: middle; }
+      .muted { font-size: 22px; fill: #8a8e94; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; fill: #8a8e94; text-anchor: middle; }
+      .box { fill: #b6ed41; stroke: #1a1d22; stroke-width: 3; stroke-dasharray: 7 7; }
+      .link { stroke: #1a1d22; stroke-width: 3; stroke-dasharray: 7 7; }
+      .dot { fill: #b6ed41; stroke: #1a1d22; stroke-width: 2.4; }
     </style>
   </defs>
 
-  <rect width="1600" height="760" fill="#fcfcf2"/>
+  <rect width="1600" height="760" fill="#f0f0ec"/>
 
   <!-- main loop -->
-  <path d="M800 210 A210 210 0 1 1 694.2 238.6" fill="none" stroke="#463a14" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M800 210 A210 210 0 1 1 694.2 238.6" fill="none" stroke="#1a1d22" stroke-width="3" marker-end="url(#arrow)"/>
 
   <!-- rework loop -->
-  <path d="M664.9 514.6 A165 165 0 0 0 926.4 526.1" fill="none" stroke="#9a8f6c" stroke-width="2" stroke-dasharray="4 6" marker-end="url(#arrow-muted)"/>
+  <path d="M664.9 514.6 A165 165 0 0 0 926.4 526.1" fill="none" stroke="#8a8e94" stroke-width="2" stroke-dasharray="4 6" marker-end="url(#arrow-muted)"/>
   <text x="800" y="562" class="muted" text-anchor="middle">rework</text>
 
   <!-- center -->
