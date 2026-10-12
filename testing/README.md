@@ -190,7 +190,19 @@ Use a sample repo with CI on pull requests, and a second GitHub account (or a te
 | Stale base: `new` refused to start the follow-up while local `main` was 3 commits behind, and said to pull | real agents, `katiawheeler/vibe` | ✅ |
 | Auto-approval: specs with open questions stop at ① (2 runs); an unambiguous chore is auto-approved, then ships and merges (vibe#24) | real agents, `katiawheeler/vibe` | ✅ |
 
-The orchestrator was rewritten around `state.py next` and `answer` after the runs above. Those commands are covered by the unit tests and the fake-agent eval runs, and the end-to-end paths above should be rerun with real agents to confirm the shorter `SKILL.md` holds up; until then, treat the rows above as evidence for the earlier orchestrator. Re-record the eval baseline at the same time.
+The orchestrator was rewritten around `state.py next` and `answer` after the runs above. These runs exercised the new loop on `katiawheeler/vibe`:
+
+| Path | How it was tested | Result |
+|---|---|---|
+| Headless `claude -p "/factory <input>"` with the new `SKILL.md`: triage and spec dispatched from `next`, usage recorded with `--tokens`, stop at ① (notesy) and at triage questions (todo-hub) | real agents, headless | ✅ |
+| Evals with the new `SKILL.md`: word-count-whitespace, json-output and vague-request pass; out-of-scope failed at triage (it proceeded with a narrowed scope instead of rejecting), and its loop routing was correct | real agents, `testing/evals` | 3/4 |
+| Triage questions answered with `answer` → spec → revision at ① → spec round 2 → approve; ② feedback without `--to` refused, with `--to implement` sent back; review and verify round 2; abort at ② → retro (7 lessons into `learnings.md`) → worktree released, branch kept → `ended` (todo-hub) | orchestrated in-session, real stage agents | ✅ |
+| Verify fails on a spec typo → implement round 2 blocks with the question → the human edits `spec.md` and steers `--to verify` → pass; a resume mid-implement re-dispatches the same round without advancing | orchestrated in-session, real stage agents | ✅ |
+| Ship: `next` refuses to move on before `pr_url` is set and before the branch is pushed; PR opened over REST after `gh pr create` hit the GraphQL block (vibe#27); land reads real CI and bot comments (Vercel, CodeRabbit) → `wait` | orchestrated in-session, real stage agents | ✅ |
+| PR fix round from feedback at land → implement → review → verify → ship (fix-round) → push → land, CI green on the new head (vibe#27) | orchestrated in-session, real stage agents | ✅ |
+| `--skip triage,review` on one run: triage and review skipped and recorded, ② → steer → abort from the steer → retro (ascii-art) | orchestrated in-session, real stage agents | ✅ |
+
+The session that ran these couldn't post PR comments (the run report and PR update), so those posts were skipped as the ship guide allows, and couldn't start more than a couple of headless sessions, so most paths were driven by an in-session orchestrator following `SKILL.md` with real stage subagents. Spec auto-approval, the review/verify/PR-fix caps, and GitHub answers are covered by the unit tests only. Re-record the eval baseline after fixing the out-of-scope triage case.
 
 Codex GUI question routing and selection of a dedicated PR creation skill are documented behavior; they have not yet been exercised in an end-to-end factory run.
 

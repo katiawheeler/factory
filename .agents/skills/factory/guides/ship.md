@@ -12,7 +12,7 @@ Read this when `next` returns `action: ship`. Its `kind` is `first` (open the PR
 
 All git commands below run in the run's `repo` (its worktree), not the human's checkout.
 
-**A fix round** only pushes:
+**A fix round** only pushes (if `report_url` is still unset, the first ship never posted its report: post it as in step 6 below too):
 1. `git push origin <branch>`. Never force-push. If the push is rejected because the remote branch moved, someone else pushed to it: `STATE advance <id> blocked "PR branch moved: <reason>"`, then `STATE next <id>`.
 2. Run `STATE pr-update <id>` and the `gh pr comment` command it prints (or post `pr-update.md` with the available GitHub tooling). Where the tooling can reply to review threads, reply in one line to each review comment `land.md` listed under **Fix**, saying what changed, and end each reply with `<!-- factory -->` so the factory doesn't read it back as feedback. Don't resolve threads; reviewers do.
 3. `STATE next <id>`.

@@ -1010,6 +1010,7 @@ else:
         self.assertEqual((out["kind"], out["note"]), ("ship-approval", "unverifiable: AC2"))
         self.assertEqual(out["verification"]["results"], {"AC1": "verified", "AC2": "unverifiable"})
         self.assertEqual((out["review"], out["replay"]), ("approve", ["Replay: npx playwright test AC1"]))
+        self.assertNotIn("skipped", out)  # nothing skipped, so nothing to say
         self.assertIn("pass --to with one of them", self.answer("-", input="add a test", ok=False))
         out = self.answer("--to", "implement", "-", input="add a test")
         self.assertEqual((out["stage"], out["did"]), ("implement", ["checkpoint-2 → implement: sent back"]))
@@ -1063,7 +1064,6 @@ else:
         self.write("land.md", "Round: 1\nVerdict: fix\n\n## Fix\n- [ ] CI test: fix it\n")
         out = self.step()
         self.assertEqual((out["stage"], out["round"], out["did"]), ("implement", 2, ["land → implement: PR feedback"]))
-        self.run_state("set", self.id, "report_url", "https://github.com/o/r/pull/7#c1")
         self.write("implementation.md", "Round: 2\nStatus: done\n")
         self.step()
         self.write("review.md", "Round: 2\nVerdict: approve\n")

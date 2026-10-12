@@ -1896,7 +1896,8 @@ class Driver:
         return None if not remote else remote == rev(branch)
 
     def ship(self):
-        fix_round = bool(self.s.get("report_url")) and self.s["rounds"].get("land", 0) > 0
+        # A fix round pushes to the open PR. Keyed on the PR, not the report comment, which may have failed to post.
+        fix_round = bool(self.s.get("pr_url")) and self.s["rounds"].get("land", 0) > 0
         unfinished = None
         if (self.s.get("dispatched") or {}).get("stage") == "ship":
             pushed = self.pushed() if self.s.get("pr_url") else False
@@ -1980,6 +1981,7 @@ class Driver:
             details["verification"] = f"invalid: {exc}"
         replays = re.findall(r"^(Replay|Video): *(.+)$", read(self.folder, "verification.md"), re.MULTILINE)
         details["replay"] = [f"{k}: {v}" for k, v in replays]
+        details["skipped"] = run_skips(s)
         approval = spec_approval(s)
         if approval and not approval.startswith("approved by a human"):
             details["spec_approval"] = f"Spec: {approval}"
