@@ -1113,11 +1113,17 @@ else: sys.exit(1)
         out = self.step()
         self.assertEqual((out["stage"], out["round"], out["did"]), ("spec", 1, ["triage → spec"]))
         self.assertEqual(self.state()["input_summary"], "do it")
-        self.write("spec.md", self.spec(1))
+        spec_text = self.spec(1) + "\nDistinctive line: café → ✓\n\n"
+        self.write("spec.md", spec_text)
         out = self.step()
         self.assertEqual((out["action"], out["kind"], out["choices"][0]), ("ask", "spec-approval", "approve"))
         self.assertEqual(out["spec"], str(folder / "spec.md"))
-        self.assertEqual(self.step()["kind"], "spec-approval")  # asking again moves nothing
+        self.assertEqual(out["spec_text"], spec_text)
+        edited_spec = spec_text + "Edited after the first ask.\n"
+        self.write("spec.md", edited_spec)
+        again = self.step()
+        self.assertEqual((again["kind"], again["spec_text"]), ("spec-approval", edited_spec))
+        self.assertEqual((again["spec"], again["choices"][0]), (str(folder / "spec.md"), "approve"))
         self.assertEqual([e["to"] for e in self.state()["history"]], ["triage", "spec", "checkpoint-1"])
 
     def test_a_stage_that_never_writes_its_output_goes_to_a_human(self):
@@ -1140,8 +1146,10 @@ else: sys.exit(1)
         self.assertEqual((out["stage"], out["round"], out["did"]), ("spec", 2, ["checkpoint-1 → spec: revise"]))
         self.write("spec.md", self.spec(1))
         self.assertEqual(self.step()["action"], "dispatch")  # a round 1 spec isn't round 2's output
-        self.write("spec.md", self.spec(2))
-        self.assertEqual(self.step()["kind"], "spec-approval")
+        revised_spec = self.spec(2).replace("## Open questions", "Revised requirement.\n\n## Open questions")
+        self.write("spec.md", revised_spec)
+        checkpoint = self.step()
+        self.assertEqual((checkpoint["kind"], checkpoint["spec_text"]), ("spec-approval", revised_spec))
         out = self.answer("approve")
         self.assertEqual((out["stage"], out["round"]), ("implement", 1))
         self.assertEqual((self.repo / ".factory/runs" / self.id / "feedback.md").read_text(),
