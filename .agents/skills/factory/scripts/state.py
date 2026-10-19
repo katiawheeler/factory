@@ -1943,9 +1943,11 @@ class Driver:
                 reason=section(triage, "Reason"), choices=["abort", "steer", "pause"], **common)
         if kind == "spec-approval":
             return self.result(
-                "ask", "Print spec.md's complete contents verbatim, then its path, and say the human can edit it "
-                "before approving. Then ask. Any text other than the choices is a revision request.",
-                spec=str(self.folder / "spec.md"), choices=["approve", "steer", "pause", "abort"], **common)
+                "ask", "Send spec_text verbatim in a user-visible message before opening the approval question. "
+                "Then show the spec path and say the human can edit it before approving. Any text other than the "
+                "choices is a revision request.",
+                spec=str(self.folder / "spec.md"), spec_text=(self.folder / "spec.md").read_text(),
+                choices=["approve", "steer", "pause", "abort"], **common)
         if kind == "ship-approval":
             return self.result(
                 "ask", "Present the ship decision: the note if there is one, the diff stat and commits, the review "
