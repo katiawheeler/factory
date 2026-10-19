@@ -27,6 +27,8 @@
   <a href="#documentation">Docs</a>
 </p>
 
+https://github.com/user-attachments/assets/3758144c-a407-493c-96dc-c5578982e277
+
 ---
 
 **factory** is a software factory for any coding agent that can read a skill and run Git and Python. Give it a ticket, URL, or prompt: it triages the request, writes a spec, implements it on a branch, reviews and verifies the work, opens a PR, and follows that PR through CI and review until it merges or closes. A human approves the spec and the decision to ship, unless the repo opts in to automating them. It never merges or deploys; merging stays a human's call.
