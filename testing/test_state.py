@@ -170,7 +170,7 @@ class StateTest(unittest.TestCase):
         (folder / "verification.md").write_text("Verdict: pass\nSuite: pass\n")
         self.advance("ship")
         self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
-        self.run_state("pr-report", self.id)
+        self.run_state("pr-report", self.id, env=self.fake_gh(False))
         report = (folder / "pr-report.md").read_text()
         self.assertIn("**Skipped by this run's `--skip` and the repo's `factory.skip`:** spec, checkpoint-1, review, "
                       "checkpoint-2.", report)
@@ -185,7 +185,7 @@ class StateTest(unittest.TestCase):
         self.assertEqual(self.state()["history"][-1]["skipped"], ["review", "verify"])
         self.advance("ship")
         self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
-        self.run_state("pr-report", self.id)
+        self.run_state("pr-report", self.id, env=self.fake_gh(False))
         report = (self.repo / ".factory/runs" / self.id / "pr-report.md").read_text()
         self.assertIn("**Skipped by the repo's `factory.skip`:** review, verify.", report)
         self.assertIn("**Verification:** skipped", report)
@@ -474,8 +474,10 @@ else:
         self.advance("implement", "review", "verify", "checkpoint-2", "blocked")
         folder = self.repo / ".factory/runs" / self.id
         self.run_state("advance", self.id, "checkpoint-2", "PR feedback did not converge")
-        out = self.run_state("checkpoint-post", self.id).stdout.splitlines()
-        self.assertTrue(out[1].startswith("gh pr comment https://github.com/o/r/pull/7 "))
+        env = self.fake_gh(False)
+        out = self.run_state("checkpoint-post", self.id, env=env).stdout.splitlines()
+        self.assertEqual(out[1], self.state()["report_url"])
+        self.assertEqual(len(self.fake_comments(env)), 1)
         post = (folder / "checkpoint-post.md").read_text()
         self.assertIn("**Note:** PR feedback did not converge", post)
         self.assertIn("push this round to the PR", post)
@@ -487,10 +489,12 @@ else:
         (folder / "implementation.md").write_text("# Implementation\n\n## Addressed\n- renamed foo (review r1)\n\n"
                                                   "## Checks run\n- tests: pass\n")
         self.advance("implement", "review", "verify", "ship")
-        out = self.run_state("pr-update", self.id).stdout.splitlines()
-        self.assertEqual(out[1], f"gh pr comment https://github.com/o/r/pull/7 --body-file {folder / 'pr-update.md'}")
+        env = self.fake_gh(False)
+        out = self.run_state("pr-update", self.id, env=env).stdout.splitlines()
+        self.assertEqual(out[1], self.state()["report_url"])
         post = (folder / "pr-update.md").read_text()
-        self.assertTrue(post.startswith(f"<!-- factory-update: {self.id} 1 -->"))
+        self.assertTrue(post.startswith(f"<!-- factory-pr: {self.id} -->"))
+        self.assertIn(f"<!-- factory-update: {self.id} 1 -->", post)
         self.assertIn("### Addressed\n\n- renamed foo (review r1)\n\n**Verification:**", post)
         self.assertIn("· PR fixes 1", post)
         self.assertNotIn("Checks run", post)
@@ -541,14 +545,14 @@ else:
                          "Spec: auto-approved by policy (size S, type bug); no human reviewed it before implementation")
         self.advance("review", "verify", "checkpoint-2", "ship")
         self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
-        self.run_state("pr-report", self.id)
+        self.run_state("pr-report", self.id, env=self.fake_gh(False))
         report = (self.repo / ".factory/runs" / self.id / "pr-report.md").read_text()
         self.assertIn("**Spec:** auto-approved by policy (size S, type bug); no human reviewed it before implementation.",
                       report)
         # A human later sends it back to spec and approves the revision: the report stops saying auto.
         self.advance("land", "blocked", "spec", "checkpoint-1", "implement")
         self.assertEqual(self.run_state("approval", self.id).stdout.strip(), "Spec: approved by a human at checkpoint 1")
-        self.run_state("pr-report", self.id)
+        self.run_state("pr-report", self.id, env=self.fake_gh(False))
         self.assertNotIn("**Spec:**", (self.repo / ".factory/runs" / self.id / "pr-report.md").read_text())
 
     def test_approval_before_and_after_a_human_approves(self):
@@ -715,14 +719,82 @@ else:
         self.assertEqual(self.state()["stage"], "blocked")
 
     def fake_gh(self, supports_attach):
-        """A gh on PATH whose `pr comment --help` does or doesn't list --attach (added in gh 2.99)."""
+        """A stateful fake GitHub CLI for PR comment publication."""
         bin_dir = self.repo.parent / f"{self.repo.name}-bin-{supports_attach}"
         bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "comments.json").write_text("[]")
+        (bin_dir / "calls.json").write_text("[]")
         gh = bin_dir / "gh"
-        gh.write_text("#!/bin/sh\necho '  -F, --body-file file'\n" + ("echo '      --attach path'\n" if supports_attach else ""))
+        gh.write_text(f'''#!/usr/bin/env python3
+import json, pathlib, sys
+root = pathlib.Path({str(bin_dir)!r})
+comments_path = root / "comments.json"
+calls_path = root / "calls.json"
+comments = json.loads(comments_path.read_text())
+calls = json.loads(calls_path.read_text())
+args = sys.argv[1:]
+calls.append(args)
+calls_path.write_text(json.dumps(calls))
+def save(): comments_path.write_text(json.dumps(comments))
+def body():
+    flag = "-F" if "-F" in args else "--body-file"
+    value = args[args.index(flag) + 1]
+    return pathlib.Path(value.removeprefix("body=@")).read_text()
+def created(content, api=False):
+    number = max((item["id"] for item in comments), default=0) + 1
+    item = {{"id": number, "body": content, "user": {{"login": "factory"}},
+            "html_url": f"https://github.com/o/r/issues/7#issuecomment-{{number}}",
+            "created_at": "2026-01-01T00:00:00Z"}}
+    comments.append(item)
+    save()
+    print(json.dumps(item) if api else item["html_url"])
+if args[:3] == ["pr", "comment", "--help"]:
+    print("  -F, --body-file file")
+    {"print('      --attach path')" if supports_attach else "pass"}
+elif args[:2] == ["pr", "comment"]:
+    if (root / "fail-upload").exists(): sys.exit(1)
+    created(body())
+elif args[0] == "api":
+    method = args[args.index("--method") + 1] if "--method" in args else "GET"
+    endpoint = next((arg for arg in args if arg.startswith("repos/")), "user")
+    if endpoint == "user": print("factory")
+    elif method == "GET":
+        if (root / "fail-list").exists(): sys.exit(1)
+        for item in comments: print(json.dumps(item))
+    elif method == "POST": created(body(), api=True)
+    elif method == "PATCH":
+        if (root / "fail-patch").exists(): sys.exit(1)
+        number = int(endpoint.rsplit("/", 1)[1])
+        item = next(item for item in comments if item["id"] == number)
+        item["body"] = body()
+        save()
+        print(json.dumps(item))
+    elif method == "DELETE":
+        number = int(endpoint.rsplit("/", 1)[1])
+        comments[:] = [item for item in comments if item["id"] != number]
+        save()
+else: sys.exit(1)
+''')
         gh.chmod(0o755)
-        self.addCleanup(lambda: (gh.unlink(), bin_dir.rmdir()))
-        return {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+        self.addCleanup(shutil.rmtree, bin_dir, ignore_errors=True)
+        return {"PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_GH_DIR": str(bin_dir)}
+
+    @staticmethod
+    def fake_comments(env):
+        return json.loads((Path(env["FAKE_GH_DIR"]) / "comments.json").read_text())
+
+    @staticmethod
+    def fake_calls(env):
+        return json.loads((Path(env["FAKE_GH_DIR"]) / "calls.json").read_text())
+
+    @staticmethod
+    def seed_fake_comments(env, comments):
+        (Path(env["FAKE_GH_DIR"]) / "comments.json").write_text(json.dumps(comments))
+
+    def factory_comment(self, number, body, author="factory"):
+        return {"id": number, "body": body, "user": {"login": author},
+                "html_url": f"https://github.com/o/r/issues/7#issuecomment-{number}",
+                "created_at": f"2026-01-{number:02d}T00:00:00Z"}
 
     def report_run(self):
         folder = self.repo / ".factory/runs" / self.id
@@ -741,15 +813,104 @@ else:
     def test_pr_report_requires_pr_url(self):
         self.assertIn("pr_url", self.run_state("pr-report", self.id, ok=False).stderr)
 
+    def test_pr_report_creates_once_then_edits_same_comment(self):
+        self.report_run()
+        env = self.fake_gh(False)
+        self.run_state("pr-report", self.id, env=env)
+        first = self.fake_comments(env)[0]
+        self.assertEqual(self.state()["report_url"], first["html_url"])
+        self.assertIn(f"factory-run: {self.id}", first["body"])
+        self.assertIn("**Verification:**", first["body"])
+        self.assertIn("**Review:**", first["body"])
+        self.assertIn("Approved spec", first["body"])
+        self.run_state("pr-report", self.id, env=env)
+        self.assertEqual([item["id"] for item in self.fake_comments(env)], [first["id"]])
+        calls = self.fake_calls(env)
+        self.assertEqual(sum("POST" in call or (call[:2] == ["pr", "comment"] and "--help" not in call)
+                             for call in calls), 1)
+        self.assertEqual(sum("PATCH" in call for call in calls), 1)
+
+    def test_pr_report_reuses_another_runs_comment_and_cleans_owned_duplicates(self):
+        self.report_run()
+        env = self.fake_gh(False)
+        self.seed_fake_comments(env, [
+            self.factory_comment(1, "<!-- factory-run: previous -->\nOld"),
+            self.factory_comment(2, "<!-- factory-update: previous 1 -->\nOlder"),
+            self.factory_comment(3, "Human note", "human"),
+            self.factory_comment(4, "Bot output", "ci[bot]"),
+        ])
+        self.run_state("pr-report", self.id, env=env)
+        comments = self.fake_comments(env)
+        self.assertEqual([item["id"] for item in comments], [1, 3, 4])
+        self.assertIn(f"factory-run: {self.id}", comments[0]["body"])
+        self.assertEqual(self.state()["report_url"], comments[0]["html_url"])
+        self.assertEqual(sum("PATCH" in call for call in self.fake_calls(env)), 1)
+        self.assertEqual(sum("DELETE" in call for call in self.fake_calls(env)), 1)
+        self.assertEqual(sum("POST" in call for call in self.fake_calls(env)), 0)
+
+    def test_pr_report_does_not_replace_foreign_or_failed_comment(self):
+        self.report_run()
+        for failure in ("foreign", "fail-list", "fail-patch"):
+            env = self.fake_gh(False)
+            author = "other" if failure == "foreign" else "factory"
+            original = self.factory_comment(1, "<!-- factory-run: previous -->\nOld", author)
+            self.seed_fake_comments(env, [original])
+            if failure != "foreign":
+                (Path(env["FAKE_GH_DIR"]) / failure).touch()
+            self.run_state("pr-report", self.id, env=env, ok=False)
+            self.assertEqual(self.fake_comments(env), [original])
+            self.assertFalse(any("POST" in call for call in self.fake_calls(env)))
+
+    def test_pr_checkpoint_and_fix_round_keep_one_comment(self):
+        self.report_run()
+        env = self.fake_gh(False)
+        self.run_state("pr-report", self.id, env=env)
+        original = self.fake_comments(env)[0]
+        self.advance("spec", "checkpoint-1")
+        self.run_state("checkpoint-post", self.id, env=env)
+        self.assertEqual([item["id"] for item in self.fake_comments(env)], [original["id"]])
+        self.assertIn("checkpoint-1", self.fake_comments(env)[0]["body"])
+        self.advance("implement", "review", "verify", "checkpoint-2", "ship", "land", "implement",
+                     "review", "verify", "ship")
+        self.run_state("pr-update", self.id, env=env)
+        self.assertEqual([item["id"] for item in self.fake_comments(env)], [original["id"]])
+        self.assertIn("factory-update", self.fake_comments(env)[0]["body"])
+        self.assertEqual(self.state()["report_url"], original["html_url"])
+        self.assertFalse(any("POST" in call for call in self.fake_calls(env)[5:]))
+
+    def test_pr_report_upload_failure_keeps_one_text_only_comment(self):
+        self.report_run()
+        env = self.fake_gh(True)
+        (Path(env["FAKE_GH_DIR"]) / "fail-upload").touch()
+        self.run_state("pr-report", self.id, env=env)
+        self.assertEqual(len(self.fake_comments(env)), 1)
+        self.assertIn("Not uploaded", self.fake_comments(env)[0]["body"])
+        self.assertNotIn("![", self.fake_comments(env)[0]["body"])
+
+    def test_pr_report_edit_retains_uploaded_media_links(self):
+        self.report_run()
+        env = self.fake_gh(True)
+        link = "![flow](https://github.com/user-attachments/assets/flow.png)"
+        self.seed_fake_comments(env, [self.factory_comment(1, f"<!-- factory-run: prior -->\n{link}")])
+        self.run_state("pr-report", self.id, env=env)
+        self.assertEqual(len(self.fake_comments(env)), 1)
+        body = self.fake_comments(env)[0]["body"]
+        self.assertIn(link, body)
+        self.assertIn("AC1-login-page.png", body)
+        self.assertNotIn("![AC1: login page](evidence/", body)
+
     def test_pr_report_attaches_media_with_gh(self):
         folder = self.report_run()
-        out = self.run_state("pr-report", self.id, env=self.fake_gh(True)).stdout.splitlines()
+        env = self.fake_gh(True)
+        out = self.run_state("pr-report", self.id, env=env).stdout.splitlines()
         self.assertEqual(out[0], str(folder / "pr-report.md"))
-        self.assertEqual(out[1], f"cd {folder} && gh pr comment https://github.com/o/r/pull/7 --body-file pr-report.md"
-                                 " --attach evidence/AC1-login-page.png --attach evidence/AC2_error.mp4"
-                                 " --attach evidence/overview.png")
+        self.assertEqual(out[1], self.state()["report_url"])
+        self.assertEqual(len(self.fake_comments(env)), 1)
+        self.assertIn("--attach", next(call for call in self.fake_calls(env) if call[:2] == ["pr", "comment"]
+                                       and "--help" not in call))
         report = (folder / "pr-report.md").read_text()
-        self.assertTrue(report.startswith(f"<!-- factory-run: {self.id} -->"))
+        self.assertTrue(report.startswith(f"<!-- factory-pr: {self.id} -->"))
+        self.assertIn(f"<!-- factory-run: {self.id} -->", report)
         self.assertIn("**Verification:** fail · test suite pass", report)
         self.assertIn("| **AC1** Login works \\| fast. | ✅ verified |", report)
         self.assertIn("| **AC2** Errors show | ⚠️ unverifiable |", report)
@@ -784,9 +945,13 @@ else:
         for name in ("AC1-01-start.png", "AC1-10-done.png", "AC1-02-mid.png", "AC1-03-edge-x.png",
                      "AC1-edge-flow.webm", "AC1-flow.webm", "AC2-01-edge-only.png", "AC2-edge-flow.webm"):
             (folder / "evidence" / name).write_bytes(b"x")
-        out = self.run_state("pr-report", self.id, env=self.fake_gh(True)).stdout.splitlines()
-        self.assertEqual(out[1].split(" --attach ")[1:], ["evidence/AC1-10-done.png", "evidence/AC1-flow.webm",
-                                                          "evidence/AC2-01-edge-only.png", "evidence/AC2-edge-flow.webm"])
+        env = self.fake_gh(True)
+        self.run_state("pr-report", self.id, env=env)
+        attach_call = next(call for call in self.fake_calls(env) if call[:2] == ["pr", "comment"]
+                           and "--attach" in call)
+        self.assertEqual([attach_call[index + 1] for index, arg in enumerate(attach_call) if arg == "--attach"],
+                         ["evidence/AC1-10-done.png", "evidence/AC1-flow.webm", "evidence/AC2-01-edge-only.png",
+                          "evidence/AC2-edge-flow.webm"])
         self.assertIn("_4 more screenshots and recordings", (folder / "pr-report.md").read_text())
 
     def test_pr_report_without_attach_support_lists_media(self):
@@ -794,7 +959,7 @@ else:
         old_gh = self.fake_gh(False)
         for env, args in ((old_gh, ()), (self.fake_gh(True), ("--no-media",))):
             out = self.run_state("pr-report", self.id, *args, env=env).stdout.splitlines()
-            self.assertEqual(out[1], f"cd {folder} && gh pr comment https://github.com/o/r/pull/7 --body-file pr-report.md")
+            self.assertEqual(out[1], self.state()["report_url"])
             report = (folder / "pr-report.md").read_text()
             self.assertIn("Not uploaded; they are in the run folder: `evidence/AC1-login-page.png`", report)
             self.assertNotIn("![", report)
@@ -814,7 +979,7 @@ else:
         self.run_state("set", self.id, "pr_url", "https://github.com/o/r/pull/7")
         (folder / "spec.md").write_text("## Acceptance criteria\n- [ ] AC1: x\n" + "s" * 50000)
         (folder / "verification.md").write_text("garbage\n" + "v" * 50000)
-        self.run_state("pr-report", self.id)
+        self.run_state("pr-report", self.id, env=self.fake_gh(False))
         report = (folder / "pr-report.md").read_text()
         self.assertLess(len(report), 65536)
         self.assertIn("report did not validate", report)
