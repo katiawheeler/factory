@@ -861,6 +861,17 @@ else: sys.exit(1)
             self.assertEqual(self.fake_comments(env), [original])
             self.assertFalse(any("POST" in call for call in self.fake_calls(env)))
 
+    def test_pr_report_ignores_quoted_factory_marker_in_human_comment(self):
+        self.report_run()
+        env = self.fake_gh(False)
+        human = self.factory_comment(1, "Review note:\n> <!-- factory-run: quoted -->\nPlease check this.", "human")
+        self.seed_fake_comments(env, [human])
+        self.run_state("pr-report", self.id, env=env)
+        comments = self.fake_comments(env)
+        self.assertEqual(comments[0], human)
+        self.assertEqual(len(comments), 2)
+        self.assertIn(f"<!-- factory-pr: {self.id} -->", comments[1]["body"])
+
     def test_pr_checkpoint_and_fix_round_keep_one_comment(self):
         self.report_run()
         env = self.fake_gh(False)
@@ -891,13 +902,32 @@ else: sys.exit(1)
         self.report_run()
         env = self.fake_gh(True)
         link = "![flow](https://github.com/user-attachments/assets/flow.png)"
-        self.seed_fake_comments(env, [self.factory_comment(1, f"<!-- factory-run: prior -->\n{link}")])
+        self.seed_fake_comments(env, [self.factory_comment(1, f"<!-- factory-run: prior -->\n"
+                                                               f"### Screenshots and recordings\n\n{link}")])
         self.run_state("pr-report", self.id, env=env)
         self.assertEqual(len(self.fake_comments(env)), 1)
         body = self.fake_comments(env)[0]["body"]
         self.assertIn(link, body)
         self.assertIn("AC1-login-page.png", body)
         self.assertNotIn("![AC1: login page](evidence/", body)
+
+    def test_pr_report_retains_only_bounded_uploaded_media(self):
+        self.report_run()
+        env = self.fake_gh(False)
+        uploaded = "![flow](https://github.com/user-attachments/assets/flow.png)"
+        unrelated = "[old spec](https://example.com/spec)"
+        long_links = [f"![image {n}](https://github.com/user-attachments/assets/{'x' * 900}{n})"
+                      for n in range(100)]
+        old_body = ("<!-- factory-run: prior -->\n### Screenshots and recordings\n\n"
+                    + "\n".join([uploaded, unrelated, *long_links]))
+        self.seed_fake_comments(env, [self.factory_comment(1, old_body)])
+        self.run_state("pr-report", self.id, env=env)
+        body = self.fake_comments(env)[0]["body"]
+        self.assertLessEqual(len(body), 60000)
+        self.assertTrue(body.startswith(f"<!-- factory-pr: {self.id} -->"))
+        self.assertIn("**Verification:** fail · test suite pass", body)
+        self.assertIn(uploaded, body)
+        self.assertNotIn(unrelated, body)
 
     def test_pr_report_attaches_media_with_gh(self):
         folder = self.report_run()
