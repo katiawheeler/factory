@@ -815,10 +815,8 @@ def details_sections(budget, files):
     return out
 
 
-def cmd_pr_report(run_id, no_media=False):
-    """The PR comment: what a reviewer needs to trust the run without the run folder."""
-    path, s = load(run_id)
-    folder = path.parent
+def build_pr_report(folder, s, no_media=False):
+    """Build a complete report and return its path and selected uploads."""
     if not s.get("pr_url"):
         die("set pr_url before writing the PR report")
     spec, review, feedback = read(folder, "spec.md"), read(folder, "review.md"), read(folder, "feedback.md")
@@ -834,18 +832,21 @@ def cmd_pr_report(run_id, no_media=False):
     if gh and tail and not no_media and not attach:
         print("warning: this gh has no `pr comment --attach` (added in gh 2.99), so media are only listed by name; "
               "upgrade gh and rerun pr-report", file=sys.stderr)
-    out += details_sections(REPORT_LIMIT - len("\n".join(out + tail)), (
+    marker_room = len(f"<!-- factory-pr: {s['id']} -->\n")
+    out += details_sections(REPORT_LIMIT - marker_room - len("\n".join(out + tail)), (
         ("Approved spec", "spec.md", spec), ("Verification evidence", "verification.md", verification),
         ("Code review", "review.md", review), ("Human feedback", "feedback.md", feedback)))
     report = folder / "pr-report.md"
     report.write_text("\n".join(out + tail).rstrip() + "\n")
+    return report, uploads
+
+
+def cmd_pr_report(run_id, no_media=False):
+    """Publish the current run report to its one PR comment."""
+    path, s = load(run_id)
+    report, uploads = build_pr_report(path.parent, s, no_media=no_media)
     print(report)
-    if gh:
-        # Run from the run folder: --attach paths and the references in the body are relative to it.
-        attach = "".join(f" --attach {shlex.quote(u)}" for u in uploads)
-        print(f"cd {shlex.quote(str(folder))} && gh pr comment {shlex.quote(s['pr_url'])} --body-file pr-report.md{attach}")
-        if GITHUB_URL.match(s["pr_url"]):
-            print(rest_fallback(s["pr_url"], report))
+    print(publish_pr_comment(path, s, report, uploads))
 
 
 GITHUB_URL = re.compile(r"https://github\.com/([^/\s]+)/([^/\s]+)/(issues|pull)/(\d+)")
@@ -889,6 +890,120 @@ def gh_items(endpoint, jq=".[]", optional=False):
     """Every item of a paginated GitHub list endpoint, or None if an optional call fails."""
     out = gh("api", "--paginate", endpoint, "--jq", jq, optional=optional)
     return None if out is None else [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+FACTORY_COMMENT = re.compile(r"\A<!-- factory-(?:pr|run|checkpoint|update):[^\n]*-->")
+UPLOADED_MEDIA = re.compile(
+    r"https://(?:github\.com/user-attachments/assets|(?:private-)?user-images\.githubusercontent\.com)/[^\s)]+"
+)
+
+
+def pr_comments(base, number):
+    return gh_items(f"{base}/issues/{number}/comments", ".[]")
+
+
+def owned_factory_comments(comments, actor):
+    factory = [c for c in comments if FACTORY_COMMENT.search(c.get("body") or "")]
+    foreign = [c for c in factory if (c.get("user") or {}).get("login", "").lower() != actor.lower()]
+    if foreign:
+        die("factory comment belongs to another GitHub actor; cannot edit or remove it")
+    return sorted(factory, key=lambda c: (c.get("created_at") or "", c["id"]))
+
+
+def preserve_uploaded_media(body, old_body):
+    """Keep GitHub-hosted media links while listing local evidence that an edit cannot upload."""
+    # GitHub rewrites local evidence to its attachment hosts. Ordinary HTTP links in the
+    # old spec, review, or feedback must not be copied into the new report.
+    links = []
+    for line in old_body.splitlines():
+        line = line.strip()
+        markdown = re.fullmatch(r"!?\[[^\]]*\]\((https?://[^)]+)\)", line)
+        if (markdown and UPLOADED_MEDIA.fullmatch(markdown.group(1))) or UPLOADED_MEDIA.fullmatch(line):
+            links.append(line)
+    unique = list(dict.fromkeys(links))
+    heading = "\n\n### Previously uploaded evidence\n\n"
+    room = REPORT_LIMIT - len(body) - len(heading) - 1
+    if room <= 0 or not unique:
+        return body
+    retained = []
+    for link in unique:
+        cost = len(link) + (2 if retained else 0)
+        if cost > room:
+            break
+        retained.append(link)
+        room -= cost
+    return body.rstrip() + heading + "\n\n".join(retained) + "\n" if retained else body
+
+
+def publish_pr_comment(path, s, body_file, uploads=()):
+    """Create once or edit the oldest owned Factory issue comment on a PR."""
+    owner, repo, kind, number = github_thread(s.get("pr_url"))
+    if kind != "pull":
+        die("PR comment publisher requires a pull request URL")
+    base = f"repos/{owner}/{repo}"
+    actor = gh("api", "user", "--jq", ".login").strip()
+    if not actor:
+        die("could not identify the authenticated GitHub actor")
+    comments = owned_factory_comments(pr_comments(base, number), actor)
+    # A second lookup immediately before creation narrows the race between independent runs.
+    if not comments:
+        comments = owned_factory_comments(pr_comments(base, number), actor)
+    body = body_file.read_text()
+    marker = f"<!-- factory-pr: {s['id']} -->\n"
+    if not body.startswith(marker):
+        body = marker + body
+    body = body[:REPORT_LIMIT]
+    created = False
+    if comments:
+        canonical = comments[0]
+        if body_file.name == "pr-report.md":
+            build_pr_report(body_file.parent, s, no_media=True)
+            body = (marker + body_file.read_text())[:REPORT_LIMIT]
+        body_file.write_text(preserve_uploaded_media(body, canonical.get("body") or ""))
+        raw = gh("api", "--method", "PATCH", f"{base}/issues/comments/{canonical['id']}",
+                 "-F", f"body=@{body_file}")
+        updated = json.loads(raw)
+        canonical = updated if updated.get("id") else canonical
+    else:
+        body_file.write_text(body)
+        if uploads:
+            command = ["gh", "pr", "comment", s["pr_url"], "--body-file", body_file.name]
+            for upload in uploads:
+                command += ["--attach", upload]
+            result = subprocess.run(command, cwd=body_file.parent, capture_output=True, text=True)
+            # The CLI can fail after GitHub accepted a comment. Always check before falling back.
+            comments = owned_factory_comments(pr_comments(base, number), actor)
+            if comments:
+                canonical = comments[0]
+                created = True
+            elif result.returncode == 0:
+                die("attachment command succeeded but its PR comment could not be found")
+            else:
+                # Rebuild without local media references before the REST text-only fallback.
+                build_pr_report(body_file.parent, s, no_media=True)
+                body_file.write_text((marker + body_file.read_text())[:REPORT_LIMIT])
+        if not created:
+            result = subprocess.run(["gh", "api", "--method", "POST", f"{base}/issues/{number}/comments",
+                                     "-F", f"body=@{body_file}"], capture_output=True, text=True)
+            if result.returncode == 0:
+                canonical = json.loads(result.stdout)
+            else:
+                found = owned_factory_comments(pr_comments(base, number), actor)
+                if not found:
+                    die(f"GitHub PR comment creation failed: {result.stderr.strip()[:300]}")
+                canonical = found[0]
+            if not canonical.get("id"):
+                die("GitHub created no identifiable PR comment")
+    url = canonical.get("html_url")
+    if not url:
+        die("GitHub did not return the Factory comment URL")
+    # Reconcile comments from previous runs and concurrent publishers only after a successful write.
+    for extra in owned_factory_comments(pr_comments(base, number), actor):
+        if extra["id"] != canonical["id"]:
+            gh("api", "--method", "DELETE", f"{base}/issues/comments/{extra['id']}")
+    s["report_url"] = url
+    save(path, s)
+    return url
 
 
 def checks_summary(check_runs, statuses):
@@ -1086,7 +1201,8 @@ def cmd_checkpoint_post(run_id):
                    "`/factory <your answers>` to answer the questions"]
     elif stage == "checkpoint-1":
         out += ["### Spec approval", "", "The complete spec is below. Approve it, or say what to change.", ""]
-        files = []
+        files = [("Verification evidence", "verification.md", read(folder, "verification.md")),
+                 ("Code review", "review.md", read(folder, "review.md"))]
         out += [read(folder, "spec.md"), ""]
         replies = ["`/factory approve` to approve the spec", "`/factory <changes>` to request a revision"]
     elif stage == "checkpoint-2":
@@ -1099,19 +1215,26 @@ def cmd_checkpoint_post(run_id):
                               capture_output=True, text=True)
         if diff.returncode == 0 and diff.stdout.strip():
             out += ["```text", diff.stdout.rstrip(), "```", ""]
-        files = [("Verification evidence", "verification.md", read(folder, "verification.md")),
+        files = [("Approved spec", "spec.md", read(folder, "spec.md")),
+                 ("Verification evidence", "verification.md", read(folder, "verification.md")),
                  ("Code review", "review.md", read(folder, "review.md"))]
         replies = ["`/factory ship` to open the PR" if not s.get("pr_url") else "`/factory ship` to push this round to the PR",
                    "`/factory <feedback>` to send the work back"]
     else:
         out += [f"### Blocked at {last['from']}", "", note or "A stage needs a human decision.", ""]
-        files = []
+        if kind == "pull":
+            out += results_summary(folder, s)
+        files = [("Approved spec", "spec.md", read(folder, "spec.md")),
+                 ("Verification evidence", "verification.md", read(folder, "verification.md")),
+                 ("Code review", "review.md", read(folder, "review.md"))]
         replies = ["`/factory <answer>` to answer and continue"]
     replies.append("`/factory abort` to stop the run")
     footer = ["", "Reply with one of:", ""] + [f"- {r}" for r in replies] + [
         "", "_Only replies from people with write access to this repository (or listed in `factory.approvers`) are read._"]
-    out += details_sections(REPORT_LIMIT - len("\n".join(out + footer)), files)
-    body = "\n".join(out + footer)
+    media, _ = media_section(folder, spec_criteria(read(folder, "spec.md")), attach=False) if kind == "pull" else ([], [])
+    marker_room = len(f"<!-- factory-pr: {s['id']} -->\n") if kind == "pull" else 0
+    out += details_sections(REPORT_LIMIT - marker_room - len("\n".join(out + media + footer)), files)
+    body = "\n".join(out + media + footer)
     if len(body) > REPORT_LIMIT:
         cut = "\n\n_Truncated to fit GitHub's comment limit; see the run folder._\n"
         head = "\n".join(out)[:REPORT_LIMIT - len(cut) - len("\n".join(footer))]
@@ -1119,6 +1242,9 @@ def cmd_checkpoint_post(run_id):
     post = folder / "checkpoint-post.md"
     post.write_text(body.rstrip() + "\n")
     print(post)
+    if kind == "pull":
+        print(publish_pr_comment(path, s, post))
+        return
     noun = "pr" if kind == "pull" else "issue"
     print(f"gh {noun} comment {shlex.quote(target)} --body-file {shlex.quote(str(post))}")
     print(rest_fallback(target, post))
@@ -1135,16 +1261,25 @@ def cmd_pr_update(run_id):
         die("no PR fix round yet; the first push is covered by pr-report")
     m = re.search(r"^## Addressed\n(.*?)(?=^## |\Z)", read(folder, "implementation.md"), re.MULTILINE | re.DOTALL)
     addressed = m.group(1).strip() if m and m.group(1).strip() else "_See the commits in this push._"
-    out = [f"{MARKER}-update: {s['id']} {n} -->", f"## Factory run `{s['id']}`: PR fix round {n}", "",
-           "### Addressed", "", addressed, ""] + results_summary(folder, s)
+    out = [f"{MARKER}-update: {s['id']} {n} -->", f"## Factory run `{s['id']}`: PR fix round {n}", ""]
+    if s.get("input_summary"):
+        out += [s["input_summary"], ""]
+    out += ["### Addressed", "", addressed, ""] + results_summary(folder, s)
+    details = (("Approved spec", "spec.md", read(folder, "spec.md")),
+               ("Verification evidence", "verification.md", read(folder, "verification.md")),
+               ("Code review", "review.md", read(folder, "review.md")),
+               ("Human feedback", "feedback.md", read(folder, "feedback.md")))
+    marker_room = len(f"<!-- factory-pr: {s['id']} -->\n")
+    out += details_sections(REPORT_LIMIT - marker_room - len("\n".join(out)), details)
+    media, _ = media_section(folder, spec_criteria(read(folder, "spec.md")), attach=False)
+    out += media
     body = "\n".join(out)
     if len(body) > REPORT_LIMIT:
         body = body[:REPORT_LIMIT - 80] + "\n\n_Truncated; see `implementation.md` in the run folder._"
     post = folder / "pr-update.md"
     post.write_text(body.rstrip() + "\n")
     print(post)
-    print(f"gh pr comment {shlex.quote(s['pr_url'])} --body-file {shlex.quote(str(post))}")
-    print(rest_fallback(s["pr_url"], post))
+    print(publish_pr_comment(path, s, post))
 
 
 def cmd_seen(run_id):

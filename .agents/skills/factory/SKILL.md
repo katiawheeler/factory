@@ -64,7 +64,7 @@ All state lives in `<main checkout>/.factory/runs/<run-id>/`, and each run works
 
 Every instruction is JSON with an `action` and a plain-English `instruction`. Before acting on it:
 - Relay every line in `tell` to the human, and mention each of `warnings` once.
-- If it has `post_on_github`, run that command and then the command it prints, before anything else (see `guides/github.md`). A failed post never blocks the local ask.
+- If it has `post_on_github`, run that command before anything else (see `guides/github.md`). It updates the single factory comment when the run has a PR. For an opted-in issue checkpoint, follow any posting command it prints. A failed post never blocks the local ask.
 
 Then, by `action`:
 
